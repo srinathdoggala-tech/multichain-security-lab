@@ -48,6 +48,8 @@ contract AMMHandler is Test {
     uint256 public failedSwapsCount;
     uint256 public reentrancyBlockedCount;
     uint256 public routerSwapsCount;
+    uint256 public constant MAX_HARNESS_IDLE_SECONDS = 30 days;
+    uint256 public lastPairActionTimestamp;
 
     constructor(address _pair, address _router, address _token0, address _token1) {
         pair = AviorAMMPairSecured(_pair);
@@ -59,6 +61,7 @@ contract AMMHandler is Test {
         actors.push(makeAddr("ALICE"));
         actors.push(makeAddr("BOB"));
         actors.push(makeAddr("CHARLIE"));
+        lastPairActionTimestamp = block.timestamp;
     }
 
     function _getActor(uint256 seed) internal view returns (address) {
@@ -80,6 +83,7 @@ contract AMMHandler is Test {
         uint256 amount1Out = numerator / denominator;
         if (amount1Out == 0 || amount1Out >= r1) return;
 
+        uint256 preK = uint256(r0) * uint256(r1);
         token0.mint(actor, amount0In);
 
         vm.startPrank(actor);
@@ -87,6 +91,10 @@ contract AMMHandler is Test {
         pair.swap(0, amount1Out, actor, bytes(""));
         vm.stopPrank();
 
+        (uint112 postR0, uint112 postR1,) = pair.getReserves();
+        require(uint256(postR0) * uint256(postR1) >= preK, "Swap0 must preserve or grow raw K");
+
+        lastPairActionTimestamp = block.timestamp;
         successfulSwaps++;
     }
 
@@ -105,6 +113,7 @@ contract AMMHandler is Test {
         uint256 amount0Out = numerator / denominator;
         if (amount0Out == 0 || amount0Out >= r0) return;
 
+        uint256 preK = uint256(r0) * uint256(r1);
         token1.mint(actor, amount1In);
 
         vm.startPrank(actor);
@@ -112,6 +121,10 @@ contract AMMHandler is Test {
         pair.swap(amount0Out, 0, actor, bytes(""));
         vm.stopPrank();
 
+        (uint112 postR0, uint112 postR1,) = pair.getReserves();
+        require(uint256(postR0) * uint256(postR1) >= preK, "Swap1 must preserve or grow raw K");
+
+        lastPairActionTimestamp = block.timestamp;
         successfulSwaps++;
     }
 
@@ -134,6 +147,7 @@ contract AMMHandler is Test {
         uint256 shares = pair.mint(actor);
         vm.stopPrank();
 
+        lastPairActionTimestamp = block.timestamp;
         if (shares > 0) {
             successfulMints++;
         }
@@ -146,12 +160,21 @@ contract AMMHandler is Test {
         if (userShares == 0) return;
 
         uint256 sharesToBurn = bound(shareSeed, 1, userShares);
+        (uint112 preR0, uint112 preR1,) = pair.getReserves();
+        uint256 preTotal = pair.totalSupply();
+        uint256 preKPerShare = (uint256(preR0) * 1e18 / preTotal) * (uint256(preR1) * 1e18 / preTotal);
 
         vm.startPrank(actor);
         pair.transfer(address(pair), sharesToBurn);
         pair.burn(actor);
         vm.stopPrank();
 
+        (uint112 postR0, uint112 postR1,) = pair.getReserves();
+        uint256 postTotal = pair.totalSupply();
+        uint256 postKPerShare = (uint256(postR0) * 1e18 / postTotal) * (uint256(postR1) * 1e18 / postTotal);
+        require(postKPerShare >= preKPerShare, "Burn must preserve or grow K per share");
+
+        lastPairActionTimestamp = block.timestamp;
         successfulBurns++;
     }
 
@@ -173,12 +196,14 @@ contract AMMHandler is Test {
     function skim(uint256 actorSeed) external {
         address actor = _getActor(actorSeed);
         pair.skim(actor);
+        lastPairActionTimestamp = block.timestamp;
         skimCount++;
     }
 
     /// @notice Action 7: Sync reserves to actual balances
     function sync() external {
         pair.sync();
+        lastPairActionTimestamp = block.timestamp;
         syncCount++;
     }
 
@@ -237,28 +262,50 @@ contract AMMHandler is Test {
     /// @notice Action 11: Execute swap via Router with slippage protection
     function swapViaRouter(uint256 actorSeed, bool zeroForOne, uint256 amountSeed) external {
         address actor = _getActor(actorSeed);
-        (uint112 r0, uint112 r1,) = pair.getReserves();
-        if (r0 < 1 ether || r1 < 1 ether) return;
+        uint256 preK;
 
-        (MockERC20 tIn, MockERC20 tOut, uint112 rIn) = zeroForOne ? (token0, token1, r0) : (token1, token0, r1);
-        uint256 amountIn = bound(amountSeed, 1e14, (uint256(rIn) * 20) / 100);
+        {
+            (uint112 r0, uint112 r1,) = pair.getReserves();
+            if (r0 < 1 ether || r1 < 1 ether) return;
+            preK = uint256(r0) * uint256(r1);
 
-        address[] memory path = new address[](2);
-        path[0] = address(tIn);
-        path[1] = address(tOut);
+            (MockERC20 tIn, MockERC20 tOut, uint112 rIn) = zeroForOne ? (token0, token1, r0) : (token1, token0, r1);
+            uint256 amountIn = bound(amountSeed, 1e14, (uint256(rIn) * 20) / 100);
 
-        uint256[] memory amounts = router.getAmountsOut(amountIn, path);
-        if (amounts[1] == 0) return;
+            address[] memory path = new address[](2);
+            path[0] = address(tIn);
+            path[1] = address(tOut);
 
-        tIn.mint(actor, amountIn);
-        vm.startPrank(actor);
-        tIn.approve(address(router), amountIn);
-        uint256 preBal = tOut.balanceOf(actor);
-        router.swapExactTokensForTokens(amountIn, amounts[1], path, actor, block.timestamp + 100);
-        vm.stopPrank();
+            uint256[] memory amounts = router.getAmountsOut(amountIn, path);
+            if (amounts[1] == 0) return;
 
-        require(tOut.balanceOf(actor) - preBal >= amounts[1], "Router slippage invariant violated");
+            tIn.mint(actor, amountIn);
+            vm.startPrank(actor);
+            tIn.approve(address(router), amountIn);
+            uint256 preBal = tOut.balanceOf(actor);
+            router.swapExactTokensForTokens(amountIn, amounts[1], path, actor, block.timestamp + 100);
+            vm.stopPrank();
+
+            require(tOut.balanceOf(actor) - preBal >= amounts[1], "Router slippage invariant violated");
+        }
+
+        (uint112 postR0, uint112 postR1,) = pair.getReserves();
+        require(uint256(postR0) * uint256(postR1) >= preK, "Router swap must preserve or grow raw K");
+
+        lastPairActionTimestamp = block.timestamp;
         routerSwapsCount++;
+    }
+
+    /// @notice Action 12: Warp block timestamp forward within the harness operational bound
+    function warpTime(uint256 timeSeed) external {
+        uint256 idle = block.timestamp - lastPairActionTimestamp;
+        if (idle >= MAX_HARNESS_IDLE_SECONDS) {
+            return;
+        }
+        uint256 remainingIdle = MAX_HARNESS_IDLE_SECONDS - idle;
+        uint256 maxJump = remainingIdle > 86400 ? 86400 : remainingIdle;
+        uint256 timeJump = bound(timeSeed, 1, maxJump);
+        vm.warp(block.timestamp + timeJump);
     }
 }
 
@@ -297,13 +344,29 @@ contract AviorAMMPairInvariantTest is Test {
 
         // Target the stateful handler for fuzz iterations
         targetContract(address(handler));
+
+        (uint112 r0, uint112 r1,) = pair.getReserves();
+        uint256 total = pair.totalSupply();
+        lastKPerShare = (uint256(r0) * 1e18 / total) * (uint256(r1) * 1e18 / total);
     }
 
-    /// @notice Invariant 1: Constant-product K remains strictly positive across all valid transitions
-    function invariant_KIsPreservedOrGrown() public view {
+    uint256 public lastKPerShare;
+
+    /// @notice Invariant 1: Constant-product reserve density per share unit ((r0/total) * (r1/total)) is monotonically non-decreasing
+    /// @dev Raw K = r0 * r1 legitimately decreases on removeLiquidity as assets exit the pool.
+    ///      However, the asset density per LP share is strictly non-decreasing:
+    ///      - Swaps accrete 0.3% fees, strictly increasing K / totalSupply^2.
+    ///      - Proportional liquidity mints leave K / totalSupply^2 invariant.
+    ///      - Proportional liquidity burns leave K / totalSupply^2 invariant (retaining fractional division dust).
+    ///      - Direct donations increase K / totalSupply^2.
+    function invariant_KPerSharePreservedOrGrown() public {
         (uint112 r0, uint112 r1,) = pair.getReserves();
-        uint256 currentK = uint256(r0) * uint256(r1);
-        assertTrue(currentK > 0, "K invariant must remain positive");
+        uint256 total = pair.totalSupply();
+        require(total > 0, "Total supply must be positive");
+
+        uint256 currentKPerShare = (uint256(r0) * 1e18 / total) * (uint256(r1) * 1e18 / total);
+        assertGe(currentKPerShare, lastKPerShare, "K per share unit must be monotonically non-decreasing");
+        lastKPerShare = currentKPerShare;
     }
 
     /// @notice Invariant 2: Pair ERC-20 balances always equal or exceed stored reserves (backing guarantee)
@@ -333,5 +396,43 @@ contract AviorAMMPairInvariantTest is Test {
         vm.expectRevert();
         pair.burn(attacker);
         vm.stopPrank();
+    }
+
+    uint256 public lastPrice0Cumulative;
+    uint256 public lastPrice1Cumulative;
+
+    /// @notice Invariant 5: Time-weighted price cumulative accumulators progress forward in modular arithmetic
+    /// @dev Over the bounded fuzz campaign (starting at 0 and accumulating non-negative spot price * timeElapsed),
+    ///      the cumulative price is monotonically non-decreasing because:
+    ///      1. Spot prices (reserve1 / reserve0) are strictly positive.
+    ///      2. Time elapsed is non-negative.
+    ///      Scope & Assumption: Monotonicity holds within the non-wrapping domain (cumulative < 2^256).
+    ///      Direct modular overflow wrapping across 2^256 and uint32 rollover is verified in AdversarialSecurityAudit.t.sol.
+    function invariant_PriceCumulativeModularProgress() public {
+        uint256 p0 = pair.price0CumulativeLast();
+        uint256 p1 = pair.price1CumulativeLast();
+        assertGe(p0, lastPrice0Cumulative, "price0Cumulative must not decrease within non-wrapping domain");
+        assertGe(p1, lastPrice1Cumulative, "price1Cumulative must not decrease within non-wrapping domain");
+        lastPrice0Cumulative = p0;
+        lastPrice1Cumulative = p1;
+    }
+
+    /// @notice Invariant 6: Stored blockTimestampLast is strictly non-future relative to the EVM clock
+    /// @dev Holds for EVERY sequence permitted by the test harness because idle time without pair interactions
+    ///      is strictly bounded by MAX_HARNESS_IDLE_SECONDS (30 days << 2^31).
+    function invariant_TimestampConsistency() public view {
+        (,, uint32 blockTimestampLast) = pair.getReserves();
+        uint32 currentTimestamp32 = uint32(block.timestamp % 2 ** 32);
+        uint32 elapsed;
+        unchecked {
+            elapsed = currentTimestamp32 - blockTimestampLast;
+        }
+        // Invariant holds for every sequence permitted by the harness:
+        assertLe(
+            elapsed,
+            handler.MAX_HARNESS_IDLE_SECONDS(),
+            "Elapsed time between pair updates must not exceed harness operational bound"
+        );
+        assertTrue(elapsed < 1 << 31, "Stored timestamp must not be in the future");
     }
 }

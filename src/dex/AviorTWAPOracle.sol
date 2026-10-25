@@ -19,7 +19,8 @@ contract AviorTWAPOracle {
 
     uint256 public price0CumulativeLast;
     uint256 public price1CumulativeLast;
-    uint32 public blockTimestampLast;
+    uint32 public blockTimestampLast; // Pair modular uint32 timestamp for cumulative arithmetic
+    uint256 public lastObservationTimestamp; // Full-width uint256 EVM timestamp of last successful update
 
     uint224 public price0Average; // UQ112x112 fixed-point representation
     uint224 public price1Average; // UQ112x112 fixed-point representation
@@ -29,6 +30,7 @@ contract AviorTWAPOracle {
     error InvalidToken();
     error ZeroReserves();
     error OracleNotInitialized();
+    error StalePrice(uint256 age, uint256 maxAge);
 
     event OracleUpdated(
         uint224 price0Average,
@@ -97,15 +99,56 @@ contract AviorTWAPOracle {
         price0CumulativeLast = price0Cumulative;
         price1CumulativeLast = price1Cumulative;
         blockTimestampLast = blockTimestamp;
+        lastObservationTimestamp = block.timestamp;
 
         emit OracleUpdated(price0Average, price1Average, blockTimestampLast, price0Cumulative, price1Cumulative);
     }
 
-    /// @notice Computes expected output amount based on current TWAP average
+    /// @notice Returns the age (in seconds) of the current TWAP price observation
+    /// @dev Uses full-width uint256 timestamp arithmetic, eliminating uint32 wrap aliasing.
+    ///      Reverts with `OracleNotInitialized` if the oracle has not recorded a snapshot yet.
+    function observationAge() public view returns (uint256 age) {
+        if (lastObservationTimestamp == 0) revert OracleNotInitialized();
+        age = block.timestamp - lastObservationTimestamp;
+    }
+
+    /// @notice Returns true if the observation age exceeds maxAge seconds or if uninitialized
+    function isStale(uint256 maxAge) public view returns (bool) {
+        if (lastObservationTimestamp == 0) return true;
+        return (block.timestamp - lastObservationTimestamp) > maxAge;
+    }
+
+    /// @notice Computes expected output amount based on TWAP with fail-closed default staleness limit (2 * period)
+    /// @dev Fail-closed default: reverts with `StalePrice` if `observationAge() > 2 * period`.
+    ///      Prevents accidental consumption of stale historical prices by naive integrators.
     /// @param token Input token address (must be token0 or token1)
     /// @param amountIn Amount of input token
     /// @return amountOut Converted amount of counter-asset based on TWAP
     function consult(address token, uint256 amountIn) external view returns (uint256 amountOut) {
+        return consult(token, amountIn, period * 2);
+    }
+
+    /// @notice Computes expected output amount with explicit caller-defined maximum staleness validation
+    /// @dev Reverts with `StalePrice` if `observationAge() > maxAge`. Recommended entry point for on-chain DeFi protocols.
+    /// @param token Input token address (must be token0 or token1)
+    /// @param amountIn Amount of input token
+    /// @param maxAge Maximum acceptable elapsed time (in seconds) since last oracle snapshot
+    /// @return amountOut Converted amount of counter-asset based on TWAP
+    function consult(address token, uint256 amountIn, uint256 maxAge) public view returns (uint256 amountOut) {
+        uint256 age = observationAge();
+        if (age > maxAge) revert StalePrice(age, maxAge);
+        return consultUnchecked(token, amountIn);
+    }
+
+    /// @notice Computes expected output amount based on last recorded TWAP snapshot without staleness enforcement
+    /// @dev WARNING - UNCHECKED INTERFACE: Does NOT validate observation age. If keepers fail to update the oracle,
+    ///      it will return arbitrary historical prices. Security-sensitive integrations (e.g., lending collateral,
+    ///      liquidations) MUST NOT use this function. Provided strictly for off-chain view analytics, historical
+    ///      backtesting, or callers performing custom off-chain timestamp validation.
+    /// @param token Input token address (must be token0 or token1)
+    /// @param amountIn Amount of input token
+    /// @return amountOut Converted amount of counter-asset based on TWAP
+    function consultUnchecked(address token, uint256 amountIn) public view returns (uint256 amountOut) {
         if (price0Average == 0 || price1Average == 0) revert OracleNotInitialized();
 
         if (token == token0) {

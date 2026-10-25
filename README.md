@@ -60,10 +60,11 @@ graph TD
   * **Slippage Bounds (`amountOutMin`):** Reverts with `InsufficientOutputAmount` if final received tokens fall below the user-specified threshold.
   * **Deadline Expiration (`block.timestamp <= deadline`):** Reverts with `ExpiredDeadline` to prevent miners/validators from withholding transactions in the mempool for adverse execution.
   * **Hop Isolation:** Chains intermediate hop outputs directly to the subsequent pool's balance via `_swapHop(...)`, eliminating EVM stack-too-deep overhead while ensuring the user's initial deposit strictly enters the first authorized pool.
-  * **Path Validation:** Reverts on identical consecutive tokens, zero input amounts, zero recipient addresses, or unregistered pools.
+  * **Token Compatibility Boundary:** Standard `AviorRouter` does **NOT** support Fee-on-Transfer (taxed) or Rebasing tokens for swaps or liquidity provision. Swaps with fee-on-transfer tokens revert with `InvalidK()`, and liquidity additions suffer uncredited token absorption. Specialized wrapper routers are required for non-standard assets.
 * **Evidence & Adversarial Tests:**
   * Unit test: [`test/dex/AviorRouter.t.sol`](./test/dex/AviorRouter.t.sol) (single-hop, multi-hop `A -> B -> C`, quotes)
   * Regression suite: [`test/regressions/AviorRouterRegression.t.sol`](./test/regressions/AviorRouterRegression.t.sol) (10 tests: slippage violations, expired deadlines, invalid paths, allowance checks, property-based fuzzing, and 1 wei dust rounding edge cases).
+  * Adversarial audit suite: [`test/dex/AdversarialSecurityAudit.t.sol`](./test/dex/AdversarialSecurityAudit.t.sol) (Fee-on-transfer swap rejection and liquidity socialization proofs).
 
 ---
 
@@ -146,10 +147,11 @@ Every test result documented below is factual and executed against local Foundry
 ```text
 $ forge test -vvv
 
-Ran 30 test suites: 77 tests passed, 0 failed, 0 skipped (77 total tests)
+Ran 31 test suites: 91 tests passed, 0 failed, 0 skipped (91 total tests)
+- AdversarialSecurityAuditTest: 14 passed (Timestamp rollover across 2^32-1, rollover with interim reserve changes, zero elapsed time, fail-closed and parameterized staleness checks, separated consultUnchecked, full uint256 observation age across 2^32 seconds, sustained manipulation holding costs, router perimeter zero-address validation, fee-on-transfer socialization, negative rebase K-checks, router FoT swap rejection, K per share invariant preservation under liquidity removal and collapse on exploit drain)
 - AviorAMMPairExploitTest: 2 passed (Reentrant sync drain & Genesis share inflation)
 - AviorAMMPairRegressionTest: 5 passed (Reentrancy mutex, fee enforcement, K-invariant fuzzing)
-- AviorAMMPairInvariantTest: 1 passed (1,000 runs, 50,000 calls across K growth, reserve backing, dead address lock, zero-shares burn)
+- AviorAMMPairInvariantTest: 1 passed (1,000 runs, 50,000 calls across K per share growth, reserve backing, dead address lock, zero-shares burn, cumulative price modular progress, bounded timestamp consistency with active warpTime)
 - AviorRouterTest: 6 passed (Single-hop quotes, fee deductions, multi-hop routing, optimal liquidity provisioning, liquidity burning)
 - AviorRouterRegressionTest: 10 passed (Slippage violations, expired deadlines, invalid paths, property fuzzing, dust rounding)
 - AviorTWAPOracleTest: 6 passed (Window enforcement, mathematical convergence, single-block flash loan manipulation immunity)
@@ -187,18 +189,21 @@ forge test -vvv
 
 ### Run Specific Security Modules
 ```bash
-# 1. Run AMM Reentrancy Exploit & Invariant Suite
+# 1. Run Adversarial AMM & TWAP Oracle Security Suite
+forge test -vvv --match-contract AdversarialSecurityAuditTest
+
+# 2. Run AMM Reentrancy Exploit & Invariant Suite
 forge test -vvv --match-contract AviorAMMPairExploitTest
 forge test -vvv --match-contract AviorAMMPairRegressionTest
 forge test -vvv --match-contract AviorAMMPairInvariantTest
 
-# 2. Run Router & Slippage Protection Tests
+# 3. Run Router & Slippage Protection Tests
 forge test -vvv --match-contract "AviorRouterTest|AviorRouterRegressionTest"
 
-# 3. Run Cross-Chain Replay Regression Suite
+# 4. Run Cross-Chain Replay Regression Suite
 forge test -vvv --match-contract CrossChainMessageVaultRegressionTest
 
-# 4. Run Intentional Vulnerability Demonstration (Expected to Fail)
+# 5. Run Intentional Vulnerability Demonstration (Expected to Fail)
 forge test -vvv --match-contract InvariantTestVulnerable --no-match-contract "^$"
 ```
 
@@ -216,6 +221,7 @@ Formal audit reports authored to professional standards are available in the [`r
 
 | Document / Report ID | Title | Scope | Status |
 | :--- | :--- | :--- | :--- |
+| [`AVIOR-DEX-002`](./reports/REPORT_DEX_02_ADVERSARIAL_AMM_ORACLE_REVIEW.md) | Adversarial Security Review: AMM Core, Router, TWAP Oracle & Non-Standard Tokens | `AviorAMMPairSecured.sol`, `AviorTWAPOracle.sol`, `AviorRouter.sol` | **Verified & Remediated** |
 | [`AVIOR-DEX-001`](./reports/REPORT_DEX_01_AMM_REENTRANCY_RESERVE_DESYNC.md) | Flash Swap Callback Reentrancy into `sync()` Liquidity Drain | `AviorAMMPair.sol` | **Verified & Remediated** |
 | [`AVIOR-CC-001`](./reports/REPORT_CC_01_CROSS_CHAIN_MESSAGE_REPLAY.md) | Cross-Chain Validator Signature Replay via Missing Domain Separation | `CrossChainMessageVault.sol` | **Verified & Remediated** |
 | [`AVIOR-VAULT-001`](./reports/REPORT_VAULT_01_ACCOUNTING_DRIFT.md) | Write-Before-Read Share Accounting Drift Overpays Withdrawers | `AccountingDriftVault.sol` | **Verified & Remediated** |
