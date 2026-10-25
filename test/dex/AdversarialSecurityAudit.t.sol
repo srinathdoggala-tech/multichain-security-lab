@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import "forge-std/Test.sol";
+import "../../src/dex/AviorAMMPair.sol";
 import "../../src/dex/AviorAMMPairSecured.sol";
 import "../../src/dex/AviorRouter.sol";
 import "../../src/dex/AviorTWAPOracle.sol";
@@ -300,8 +301,27 @@ contract AdversarialSecurityAuditTest is Test {
         // Check Bob's final token balances:
         // Bob receives 90.25 FoT (suffered 5% fee on deposit, 5% fee on withdrawal = 95 - 4.75 = 90.25)
         assertEq(fot.balanceOf(bob), 90.25 ether);
-        // Bob receives only ~95.238 standard tokens instead of the 100 standard tokens he supplied!
-        assertApproxEqAbs(standard.balanceOf(bob), 95.238 ether, 0.001 ether);
+        // Bob receives exactly 2,000 / 21 ether = ~95.238 standard tokens instead of the 100 standard tokens he supplied!
+        assertEq(standard.balanceOf(bob), (uint256(2_000 ether) / 21));
+
+        // Pair STD balance is 2000 ether - (2000 ether / 21) = 1904.761904761904761905 ether STD:
+        assertEq(standard.balanceOf(address(fotPair)), 2_000 ether - (uint256(2_000 ether) / 21));
+
+        // Tax recipient collected exactly 5.0 (Bob deposit) + 4.75 (Bob withdrawal) = 9.75 FoT:
+        assertEq(fot.balanceOf(makeAddr("TAX_RECIPIENT")), 9.75 ether + 100 ether); // initial 100 from Alice + 9.75 from Bob
+
+        // The permanently locked minimum liquidity position holds 1,000 wei LP shares out of 1,900 ether total supply.
+        // Its pro-rata claim on the socialized STD pool is:
+        // 1000 * (2000 ether - 2000/21 ether) / 1900 ether = 1002 wei STD.
+        // The net gain is 1002 - 1000 = 2 wei (the exact continuous fraction is 1000 * 100/21 / 1900 = 2.50626... wei,
+        // which truncates in integer math to exactly 2 wei, NOT 2,506 wei).
+        uint256 deadSTDClaim = (1000 * standard.balanceOf(address(fotPair))) / fotPair.totalSupply();
+        assertEq(deadSTDClaim, 1002, "Dead address claim on socialized STD is 1002 wei");
+        assertEq(
+            deadSTDClaim - 1000,
+            2,
+            "Dead address net gain is exactly 2 wei (2.506 wei theoretical before integer truncation)"
+        );
     }
 
     // =========================================================================
@@ -473,6 +493,11 @@ contract AdversarialSecurityAuditTest is Test {
 
         vm.expectRevert(AviorTWAPOracle.OracleNotInitialized.selector);
         freshOracle.consultUnchecked(address(token0), 100 ether);
+
+        vm.expectRevert(AviorTWAPOracle.OracleNotInitialized.selector);
+        freshOracle.observationAge();
+
+        assertTrue(freshOracle.isStale(1 hours));
     }
 
     // =========================================================================
@@ -533,9 +558,9 @@ contract AdversarialSecurityAuditTest is Test {
         oracle.update();
     }
 
-    /// @notice Proves that after 2^32 seconds (~136.19 years), uint32 modular age wraps around,
-    ///         causing isStale() and consult(..., maxAge) to misclassify a 136-year-old observation as fresh.
-    function test_Adversarial_ObservationAgeWrapsAfter136Years() public {
+    /// @notice Proves that with full-width uint256 lastObservationTimestamp, observations older than
+    ///         2^32 seconds (~136.19 years) are accurately detected as stale and revert on consult.
+    function test_Adversarial_ObservationOlderThan2ToThe32SecondsRevertsOnConsult() public {
         vm.warp(block.timestamp + PERIOD);
         oracle.update();
 
@@ -543,16 +568,24 @@ contract AdversarialSecurityAuditTest is Test {
         uint256 ancientTime = block.timestamp + (uint256(1) << 32) + 10;
         vm.warp(ancientTime);
 
-        // Modular distance wraps around: uint32(ancientTime % 2^32) - t0 == 10
-        uint32 reportedAge = oracle.observationAge();
-        assertEq(reportedAge, 10, "Observation age wrapped modulo 2^32");
+        // Full-width uint256 observation age does NOT wrap: age is 2^32 + 10
+        uint256 reportedAge = oracle.observationAge();
+        assertEq(reportedAge, (uint256(1) << 32) + 10, "Full uint256 observation age does not wrap");
 
-        // isStale(3600) evaluates 10 > 3600 -> FALSE!
-        assertFalse(oracle.isStale(1 hours), "Ancient observation falsely classified as not stale");
+        // isStale(3600) correctly returns TRUE:
+        assertTrue(oracle.isStale(1 hours), "Ancient observation correctly classified as stale");
 
-        // consult() with 1 hour maxAge succeeds because 10s < 1 hour!
-        uint256 ancientPrice = oracle.consult(address(token0), 100 ether, 1 hours);
-        assertEq(ancientPrice, 100 ether, "Ancient 136-year-old observation returned as valid");
+        // consult() with 1 hour maxAge correctly REVERTS with StalePrice:
+        vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.StalePrice.selector, reportedAge, 1 hours));
+        oracle.consult(address(token0), 100 ether, 1 hours);
+
+        // Default consult() also REVERTS with StalePrice:
+        vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.StalePrice.selector, reportedAge, 2 * PERIOD));
+        oracle.consult(address(token0), 100 ether);
+
+        // Explicitly unchecked consultUnchecked() returns historical quote (documenting unchecked behavior):
+        uint256 ancientPrice = oracle.consultUnchecked(address(token0), 100 ether);
+        assertEq(ancientPrice, 100 ether, "Unchecked interface serves historical quote");
     }
 
     // =========================================================================
@@ -593,5 +626,68 @@ contract AdversarialSecurityAuditTest is Test {
         vm.expectRevert(AviorAMMPairSecured.InvalidK.selector);
         router.swapExactTokensForTokens(100 ether, 1 ether, path, bob, block.timestamp + 100);
         vm.stopPrank();
+    }
+
+    // =========================================================================
+    // 13. K PER SHARE INVARIANT VALIDATION & EXPLOIT SENSITIVITY TEST
+    // =========================================================================
+
+    /// @notice Verifies that K per share ((r0 * 1e18 / total) * (r1 * 1e18 / total)) is preserved on legitimate
+    ///         liquidity removal, but collapses to near-zero when an exploit drain occurs.
+    function test_Adversarial_KPerShareInvariantValidUnderLiquidityRemovalAndFailsOnExploit() public {
+        // 1. On secured pair: removeLiquidity drops raw K, but preserves K per share
+        (uint112 r0Pre, uint112 r1Pre,) = pair.getReserves();
+        uint256 totalPre = pair.totalSupply();
+        uint256 kPerSharePre = (uint256(r0Pre) * 1e18 / totalPre) * (uint256(r1Pre) * 1e18 / totalPre);
+
+        // Add liquidity for Alice
+        token0.mint(alice, 100 ether);
+        token1.mint(alice, 100 ether);
+        vm.startPrank(alice);
+        token0.approve(address(router), 100 ether);
+        token1.approve(address(router), 100 ether);
+        (,, uint256 liq) = router.addLiquidity(
+            address(token0), address(token1), 100 ether, 100 ether, 90 ether, 90 ether, alice, block.timestamp + 100
+        );
+
+        (uint112 r0Peak, uint112 r1Peak,) = pair.getReserves();
+        uint256 rawKPeak = uint256(r0Peak) * uint256(r1Peak);
+
+        // Alice burns 50% of her liquidity
+        pair.approve(address(router), liq / 2);
+        router.removeLiquidity(address(token0), address(token1), liq / 2, 0, 0, alice, block.timestamp + 100);
+        vm.stopPrank();
+
+        (uint112 r0Post, uint112 r1Post,) = pair.getReserves();
+        uint256 totalPost = pair.totalSupply();
+        uint256 kPerSharePost = (uint256(r0Post) * 1e18 / totalPost) * (uint256(r1Post) * 1e18 / totalPost);
+        uint256 rawKPost = uint256(r0Post) * uint256(r1Post);
+
+        // Raw K legitimately drops after burn:
+        assertLt(rawKPost, rawKPeak, "Raw K drops upon liquidity burn");
+        // BUT K per share is preserved / non-decreasing:
+        assertGe(kPerSharePost, kPerSharePre, "K per share must be non-decreasing on legitimate burn");
+
+        // 2. On vulnerable pair: reentrant drain collapses K per share to zero
+        AviorAMMPair vulnPair = new AviorAMMPair(address(token0), address(token1));
+        token0.mint(address(vulnPair), 100 ether);
+        token1.mint(address(vulnPair), 100 ether);
+        vulnPair.mint(alice);
+
+        uint256 vulnTotal = vulnPair.totalSupply();
+        (uint112 v0, uint112 v1,) = vulnPair.getReserves();
+        uint256 vulnKPerSharePre = (uint256(v0) * 1e18 / vulnTotal) * (uint256(v1) * 1e18 / vulnTotal);
+        assertGt(vulnKPerSharePre, 0);
+
+        // Simulate reserve drain on vulnerable pair
+        vm.prank(address(vulnPair));
+        token0.transfer(bob, 99 ether);
+        vulnPair.sync();
+
+        (uint112 v0Post, uint112 v1Post,) = vulnPair.getReserves();
+        uint256 vulnKPerSharePost = (uint256(v0Post) * 1e18 / vulnTotal) * (uint256(v1Post) * 1e18 / vulnTotal);
+
+        // K per share collapses by 99% upon exploit drain!
+        assertLt(vulnKPerSharePost, vulnKPerSharePre / 50, "K per share collapses on exploit drain");
     }
 }

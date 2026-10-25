@@ -147,11 +147,11 @@ Every test result documented below is factual and executed against local Foundry
 ```text
 $ forge test -vvv
 
-Ran 31 test suites: 90 tests passed, 0 failed, 0 skipped (90 total tests)
-- AdversarialSecurityAuditTest: 13 passed (Timestamp rollover across 2^32-1, rollover with interim reserve changes, zero elapsed time, fail-closed and parameterized staleness checks, separated consultUnchecked, 136-year wrap aliasing, sustained manipulation holding costs, router perimeter zero-address validation, fee-on-transfer socialization, negative rebase K-checks, router FoT swap rejection)
+Ran 31 test suites: 91 tests passed, 0 failed, 0 skipped (91 total tests)
+- AdversarialSecurityAuditTest: 14 passed (Timestamp rollover across 2^32-1, rollover with interim reserve changes, zero elapsed time, fail-closed and parameterized staleness checks, separated consultUnchecked, full uint256 observation age across 2^32 seconds, sustained manipulation holding costs, router perimeter zero-address validation, fee-on-transfer socialization, negative rebase K-checks, router FoT swap rejection, K per share invariant preservation under liquidity removal and collapse on exploit drain)
 - AviorAMMPairExploitTest: 2 passed (Reentrant sync drain & Genesis share inflation)
 - AviorAMMPairRegressionTest: 5 passed (Reentrancy mutex, fee enforcement, K-invariant fuzzing)
-- AviorAMMPairInvariantTest: 1 passed (1,000 runs, 50,000 calls across K growth, reserve backing, dead address lock, zero-shares burn, cumulative price modular progress, bounded timestamp consistency with active warpTime)
+- AviorAMMPairInvariantTest: 1 passed (1,000 runs, 50,000 calls across K per share growth, reserve backing, dead address lock, zero-shares burn, cumulative price modular progress, bounded timestamp consistency with active warpTime)
 - AviorRouterTest: 6 passed (Single-hop quotes, fee deductions, multi-hop routing, optimal liquidity provisioning, liquidity burning)
 - AviorRouterRegressionTest: 10 passed (Slippage violations, expired deadlines, invalid paths, property fuzzing, dust rounding)
 - AviorTWAPOracleTest: 6 passed (Window enforcement, mathematical convergence, single-block flash loan manipulation immunity)

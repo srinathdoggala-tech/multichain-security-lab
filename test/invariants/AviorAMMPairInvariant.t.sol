@@ -83,12 +83,16 @@ contract AMMHandler is Test {
         uint256 amount1Out = numerator / denominator;
         if (amount1Out == 0 || amount1Out >= r1) return;
 
+        uint256 preK = uint256(r0) * uint256(r1);
         token0.mint(actor, amount0In);
 
         vm.startPrank(actor);
         token0.transfer(address(pair), amount0In);
         pair.swap(0, amount1Out, actor, bytes(""));
         vm.stopPrank();
+
+        (uint112 postR0, uint112 postR1,) = pair.getReserves();
+        require(uint256(postR0) * uint256(postR1) >= preK, "Swap0 must preserve or grow raw K");
 
         lastPairActionTimestamp = block.timestamp;
         successfulSwaps++;
@@ -109,12 +113,16 @@ contract AMMHandler is Test {
         uint256 amount0Out = numerator / denominator;
         if (amount0Out == 0 || amount0Out >= r0) return;
 
+        uint256 preK = uint256(r0) * uint256(r1);
         token1.mint(actor, amount1In);
 
         vm.startPrank(actor);
         token1.transfer(address(pair), amount1In);
         pair.swap(amount0Out, 0, actor, bytes(""));
         vm.stopPrank();
+
+        (uint112 postR0, uint112 postR1,) = pair.getReserves();
+        require(uint256(postR0) * uint256(postR1) >= preK, "Swap1 must preserve or grow raw K");
 
         lastPairActionTimestamp = block.timestamp;
         successfulSwaps++;
@@ -152,11 +160,19 @@ contract AMMHandler is Test {
         if (userShares == 0) return;
 
         uint256 sharesToBurn = bound(shareSeed, 1, userShares);
+        (uint112 preR0, uint112 preR1,) = pair.getReserves();
+        uint256 preTotal = pair.totalSupply();
+        uint256 preKPerShare = (uint256(preR0) * 1e18 / preTotal) * (uint256(preR1) * 1e18 / preTotal);
 
         vm.startPrank(actor);
         pair.transfer(address(pair), sharesToBurn);
         pair.burn(actor);
         vm.stopPrank();
+
+        (uint112 postR0, uint112 postR1,) = pair.getReserves();
+        uint256 postTotal = pair.totalSupply();
+        uint256 postKPerShare = (uint256(postR0) * 1e18 / postTotal) * (uint256(postR1) * 1e18 / postTotal);
+        require(postKPerShare >= preKPerShare, "Burn must preserve or grow K per share");
 
         lastPairActionTimestamp = block.timestamp;
         successfulBurns++;
@@ -246,27 +262,36 @@ contract AMMHandler is Test {
     /// @notice Action 11: Execute swap via Router with slippage protection
     function swapViaRouter(uint256 actorSeed, bool zeroForOne, uint256 amountSeed) external {
         address actor = _getActor(actorSeed);
-        (uint112 r0, uint112 r1,) = pair.getReserves();
-        if (r0 < 1 ether || r1 < 1 ether) return;
+        uint256 preK;
 
-        (MockERC20 tIn, MockERC20 tOut, uint112 rIn) = zeroForOne ? (token0, token1, r0) : (token1, token0, r1);
-        uint256 amountIn = bound(amountSeed, 1e14, (uint256(rIn) * 20) / 100);
+        {
+            (uint112 r0, uint112 r1,) = pair.getReserves();
+            if (r0 < 1 ether || r1 < 1 ether) return;
+            preK = uint256(r0) * uint256(r1);
 
-        address[] memory path = new address[](2);
-        path[0] = address(tIn);
-        path[1] = address(tOut);
+            (MockERC20 tIn, MockERC20 tOut, uint112 rIn) = zeroForOne ? (token0, token1, r0) : (token1, token0, r1);
+            uint256 amountIn = bound(amountSeed, 1e14, (uint256(rIn) * 20) / 100);
 
-        uint256[] memory amounts = router.getAmountsOut(amountIn, path);
-        if (amounts[1] == 0) return;
+            address[] memory path = new address[](2);
+            path[0] = address(tIn);
+            path[1] = address(tOut);
 
-        tIn.mint(actor, amountIn);
-        vm.startPrank(actor);
-        tIn.approve(address(router), amountIn);
-        uint256 preBal = tOut.balanceOf(actor);
-        router.swapExactTokensForTokens(amountIn, amounts[1], path, actor, block.timestamp + 100);
-        vm.stopPrank();
+            uint256[] memory amounts = router.getAmountsOut(amountIn, path);
+            if (amounts[1] == 0) return;
 
-        require(tOut.balanceOf(actor) - preBal >= amounts[1], "Router slippage invariant violated");
+            tIn.mint(actor, amountIn);
+            vm.startPrank(actor);
+            tIn.approve(address(router), amountIn);
+            uint256 preBal = tOut.balanceOf(actor);
+            router.swapExactTokensForTokens(amountIn, amounts[1], path, actor, block.timestamp + 100);
+            vm.stopPrank();
+
+            require(tOut.balanceOf(actor) - preBal >= amounts[1], "Router slippage invariant violated");
+        }
+
+        (uint112 postR0, uint112 postR1,) = pair.getReserves();
+        require(uint256(postR0) * uint256(postR1) >= preK, "Router swap must preserve or grow raw K");
+
         lastPairActionTimestamp = block.timestamp;
         routerSwapsCount++;
     }
@@ -319,13 +344,29 @@ contract AviorAMMPairInvariantTest is Test {
 
         // Target the stateful handler for fuzz iterations
         targetContract(address(handler));
+
+        (uint112 r0, uint112 r1,) = pair.getReserves();
+        uint256 total = pair.totalSupply();
+        lastKPerShare = (uint256(r0) * 1e18 / total) * (uint256(r1) * 1e18 / total);
     }
 
-    /// @notice Invariant 1: Constant-product K remains strictly positive across all valid transitions
-    function invariant_KIsPreservedOrGrown() public view {
+    uint256 public lastKPerShare;
+
+    /// @notice Invariant 1: Constant-product reserve density per share unit ((r0/total) * (r1/total)) is monotonically non-decreasing
+    /// @dev Raw K = r0 * r1 legitimately decreases on removeLiquidity as assets exit the pool.
+    ///      However, the asset density per LP share is strictly non-decreasing:
+    ///      - Swaps accrete 0.3% fees, strictly increasing K / totalSupply^2.
+    ///      - Proportional liquidity mints leave K / totalSupply^2 invariant.
+    ///      - Proportional liquidity burns leave K / totalSupply^2 invariant (retaining fractional division dust).
+    ///      - Direct donations increase K / totalSupply^2.
+    function invariant_KPerSharePreservedOrGrown() public {
         (uint112 r0, uint112 r1,) = pair.getReserves();
-        uint256 currentK = uint256(r0) * uint256(r1);
-        assertTrue(currentK > 0, "K invariant must remain positive");
+        uint256 total = pair.totalSupply();
+        require(total > 0, "Total supply must be positive");
+
+        uint256 currentKPerShare = (uint256(r0) * 1e18 / total) * (uint256(r1) * 1e18 / total);
+        assertGe(currentKPerShare, lastKPerShare, "K per share unit must be monotonically non-decreasing");
+        lastKPerShare = currentKPerShare;
     }
 
     /// @notice Invariant 2: Pair ERC-20 balances always equal or exceed stored reserves (backing guarantee)

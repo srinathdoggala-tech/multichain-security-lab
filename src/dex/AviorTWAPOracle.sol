@@ -19,7 +19,8 @@ contract AviorTWAPOracle {
 
     uint256 public price0CumulativeLast;
     uint256 public price1CumulativeLast;
-    uint32 public blockTimestampLast;
+    uint32 public blockTimestampLast; // Pair modular uint32 timestamp for cumulative arithmetic
+    uint256 public lastObservationTimestamp; // Full-width uint256 EVM timestamp of last successful update
 
     uint224 public price0Average; // UQ112x112 fixed-point representation
     uint224 public price1Average; // UQ112x112 fixed-point representation
@@ -29,7 +30,7 @@ contract AviorTWAPOracle {
     error InvalidToken();
     error ZeroReserves();
     error OracleNotInitialized();
-    error StalePrice(uint32 age, uint256 maxAge);
+    error StalePrice(uint256 age, uint256 maxAge);
 
     event OracleUpdated(
         uint224 price0Average,
@@ -98,25 +99,23 @@ contract AviorTWAPOracle {
         price0CumulativeLast = price0Cumulative;
         price1CumulativeLast = price1Cumulative;
         blockTimestampLast = blockTimestamp;
+        lastObservationTimestamp = block.timestamp;
 
         emit OracleUpdated(price0Average, price1Average, blockTimestampLast, price0Cumulative, price1Cumulative);
     }
 
     /// @notice Returns the age (in seconds) of the current TWAP price observation
-    /// @dev ASSUMPTION & LIMITATION: Relies on `uint32` modular arithmetic matching `pair.blockTimestampLast`.
-    ///      If the oracle is neglected for >= 2^32 seconds (~136.19 years), `age` wraps modulo 2^32.
-    ///      Consequently, `isStale(maxAge)` and `consult(..., maxAge)` cannot detect staleness for intervals >= 2^32 seconds.
-    ///      Integrators must ensure keepers invoke `update()` at least once per 136-year epoch.
-    function observationAge() public view returns (uint32 age) {
-        unchecked {
-            age = uint32(block.timestamp % 2 ** 32) - blockTimestampLast;
-        }
+    /// @dev Uses full-width uint256 timestamp arithmetic, eliminating uint32 wrap aliasing.
+    ///      Reverts with `OracleNotInitialized` if the oracle has not recorded a snapshot yet.
+    function observationAge() public view returns (uint256 age) {
+        if (lastObservationTimestamp == 0) revert OracleNotInitialized();
+        age = block.timestamp - lastObservationTimestamp;
     }
 
-    /// @notice Returns true if the observation age exceeds maxAge seconds
-    /// @dev Subject to the uint32 modular wrap assumption (see `observationAge()`).
-    function isStale(uint256 maxAge) external view returns (bool) {
-        return observationAge() > maxAge;
+    /// @notice Returns true if the observation age exceeds maxAge seconds or if uninitialized
+    function isStale(uint256 maxAge) public view returns (bool) {
+        if (lastObservationTimestamp == 0) return true;
+        return (block.timestamp - lastObservationTimestamp) > maxAge;
     }
 
     /// @notice Computes expected output amount based on TWAP with fail-closed default staleness limit (2 * period)
@@ -131,13 +130,12 @@ contract AviorTWAPOracle {
 
     /// @notice Computes expected output amount with explicit caller-defined maximum staleness validation
     /// @dev Reverts with `StalePrice` if `observationAge() > maxAge`. Recommended entry point for on-chain DeFi protocols.
-    ///      Note: Cannot detect staleness if elapsed time wraps across 2^32 seconds (see `observationAge()`).
     /// @param token Input token address (must be token0 or token1)
     /// @param amountIn Amount of input token
     /// @param maxAge Maximum acceptable elapsed time (in seconds) since last oracle snapshot
     /// @return amountOut Converted amount of counter-asset based on TWAP
     function consult(address token, uint256 amountIn, uint256 maxAge) public view returns (uint256 amountOut) {
-        uint32 age = observationAge();
+        uint256 age = observationAge();
         if (age > maxAge) revert StalePrice(age, maxAge);
         return consultUnchecked(token, amountIn);
     }

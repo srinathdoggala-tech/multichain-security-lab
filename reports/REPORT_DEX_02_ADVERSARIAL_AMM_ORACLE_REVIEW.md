@@ -12,14 +12,15 @@
 - **Inherited Material:** Base EVM educational challenge labs (reentrancy, oracle attack, signature replay) originated from [`void-node/My-first-smart-contract-audit-lab`](https://github.com/void-node/My-first-smart-contract-audit-lab).
 - **Adapted Material:** The core constant-product AMM pair ([`src/dex/AviorAMMPairSecured.sol`](../src/dex/AviorAMMPairSecured.sol)), slippage router ([`src/dex/AviorRouter.sol`](../src/dex/AviorRouter.sol)), and TWAP oracle ([`src/dex/AviorTWAPOracle.sol`](../src/dex/AviorTWAPOracle.sol)) adapt canonical Uniswap v2 mechanisms to Solidity `0.8.28`, replacing legacy assembly/Solidity 0.6 constructs with OpenZeppelin `ReentrancyGuard`, custom errors, and modular math libraries.
 - **Independently Authored Security Work:**
-  1. Adversarial test suite [`test/dex/AdversarialSecurityAudit.t.sol`](../test/dex/AdversarialSecurityAudit.t.sol) (13 tests covering boundary conditions, stale price exploitation, age aliasing across $2^{32}$ seconds, FoT socialization, rebase freezes, and rollover).
+  1. Adversarial test suite [`test/dex/AdversarialSecurityAudit.t.sol`](../test/dex/AdversarialSecurityAudit.t.sol) (14 tests covering boundary conditions, stale price exploitation, full-width `uint256` observation age calculation across $2^{32}$ seconds, FoT socialization, rebase freezes, rollover, and K per share invariant sensitivity).
   2. Multi-tier staleness architecture in [`src/dex/AviorTWAPOracle.sol`](../src/dex/AviorTWAPOracle.sol):
+     - Separate full-width `uint256 public lastObservationTimestamp` recording observation time on successful `update()`, completely eliminating observation age wrapping across $2^{32}$ seconds while keeping the pair's modular `uint32` cumulative price logic separate.
      - Fail-closed default `consult(address token, uint256 amountIn)` enforcing `2 * period` maximum staleness.
      - Parameterized `consult(address token, uint256 amountIn, uint256 maxAge)` for protocol-specific freshness limits.
      - Explicitly separated `consultUnchecked(address token, uint256 amountIn)` with NatSpec warnings for off-chain indexing/analytics.
      - View helpers `observationAge()` and `isStale(maxAge)`.
   3. Perimeter zero-address validation in [`src/dex/AviorRouter.sol`](../src/dex/AviorRouter.sol) for `addLiquidity` and `removeLiquidity`.
-  4. Stateful invariant harness upgrade [`test/invariants/AviorAMMPairInvariant.t.sol`](../test/invariants/AviorAMMPairInvariant.t.sol) implementing an operational idle bound (`MAX_HARNESS_IDLE_SECONDS = 30 days`), active `warpTime` progression (4,100+ warps across 50,000 calls), `invariant_PriceCumulativeModularProgress`, and bounded `invariant_TimestampConsistency`.
+  4. Stateful invariant harness upgrade [`test/invariants/AviorAMMPairInvariant.t.sol`](../test/invariants/AviorAMMPairInvariant.t.sol) implementing an operational idle bound (`MAX_HARNESS_IDLE_SECONDS = 30 days`), active `warpTime` progression (4,100+ warps across 50,000 calls), `invariant_KPerSharePreservedOrGrown`, swap-specific raw $K$ preservation, burn-specific $K_{\text{per\_share}}$ consistency, `invariant_PriceCumulativeModularProgress`, and bounded `invariant_TimestampConsistency`.
 
 ---
 
@@ -28,7 +29,7 @@
 An independent, adversarial security review was performed on the `audit/adversarial-security-review` branch of `srinathdoggala-tech/multichain-security-lab`. The review verified core properties across the AMM pair, router, oracle, and adversarial token mocks.
 
 - **Total Test Suites:** 31
-- **Total Tests Passing:** 90 (0 failed, 0 skipped)
+- **Total Tests Passing:** 91 (0 failed, 0 skipped)
 - **Stateful Invariant Testing:** 1,000 runs, 50,000 calls across all 6 invariants with active time warping and zero invariant violations.
 
 ---
@@ -56,41 +57,43 @@ Consistent status definitions applied across the review:
 
 ## Detailed Technical Findings
 
-### 1. `AVIOR-ORACLE-001`: Observation Staleness & Modular Age Wrapping in `AviorTWAPOracle.sol`
+### 1. `AVIOR-ORACLE-001`: Observation Staleness & Freshness Timestamp Architecture in `AviorTWAPOracle.sol`
 * **Component:** [`src/dex/AviorTWAPOracle.sol`](../src/dex/AviorTWAPOracle.sol)
 * **Classification:** Integration Hazard / Protocol Limitation
 * **Severity:** **Medium** (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N — Score: 6.5)
-* **Status:** **Partially Mitigated**
+* **Status:** **Remediated** (Freshness architecture hardened via full-width `uint256` observation timestamp; unchecked API segregated)
 * **Technical Description:**
   In pull-based TWAP oracles, average prices are only refreshed when external keepers invoke `update()`. If keepers stall or market volatility spikes during an outage, an oracle consumer querying historical averages receives stale prices. In lending and collateral systems, reading stale prices allows attackers to borrow against depreciated collateral or evade liquidations.
 * **Architecture & Interface Separation:**
   To prevent naive integrators from accidentally consuming stale prices while preserving functionality for off-chain view callers:
-  1. **Fail-Closed Default Interface (`consult(token, amountIn)`):**
+  1. **Full-Width Observation Timestamp (`lastObservationTimestamp`):**
+     A dedicated `uint256 public lastObservationTimestamp` is recorded upon each successful `update()`.
+     `observationAge()` calculates the full EVM age via full-width 256-bit subtraction:
+     $$\text{age} = \text{block.timestamp} - \text{lastObservationTimestamp}$$
+     Reverts with `OracleNotInitialized()` if `lastObservationTimestamp == 0`.
+     This cleanly separates oracle observation freshness from the AMM pair's internal `uint32` cumulative price packing. As a result, observations older than $2^{32}$ seconds (~136.19 years) **never wrap modulo $2^{32}$** and are correctly identified as stale.
+  2. **Fail-Closed Default Interface (`consult(token, amountIn)`):**
      Calls `consult(token, amountIn, period * 2)`. Reverts with `StalePrice(age, maxAge)` if the observation is older than 2 observation windows ($2 \times \text{period}$).
-  2. **Parameterized Freshness Interface (`consult(token, amountIn, maxAge)`):**
+  3. **Parameterized Freshness Interface (`consult(token, amountIn, maxAge)`):**
      Enforces caller-defined freshness bounds:
      ```solidity
      function consult(address token, uint256 amountIn, uint256 maxAge) public view returns (uint256 amountOut) {
-         uint32 age = observationAge();
+         uint256 age = observationAge();
          if (age > maxAge) revert StalePrice(age, maxAge);
          return consultUnchecked(token, amountIn);
      }
      ```
-  3. **Explicitly Separated Unchecked Interface (`consultUnchecked(token, amountIn)`):**
-     Clearly labeled as `Unchecked` with explicit NatSpec warnings. Retained strictly for off-chain indexing, analytics, and historical backtesting where timestamp filtering occurs off-chain.
-* **The 136-Year `uint32` Modular Limitation:**
-  `AviorTWAPOracle` records `blockTimestampLast` as `uint32` to match the AMM pair's storage slot packing.
-  `observationAge()` calculates:
-  $$\text{age} = \left(\text{uint32}(\text{block.timestamp}) - \text{blockTimestampLast}\right) \pmod{2^{32}}$$
-  **Fundamental Protocol Assumption:** The oracle MUST receive an update at least once every $2^{32}-1$ seconds ($\approx 136.19$ years).
-  **Behavior on Wrap:** If an oracle observation is neglected for $\Delta t \ge 2^{32}$ seconds, the elapsed time wraps modulo $2^{32}$. For example, if $2^{32} + 10$ seconds elapse, `observationAge()` computes 10 seconds. `isStale(3600)` returns `false` and `consult(..., 3600)` treats a 136-year-old observation as 10 seconds old.
+  4. **Explicitly Separated Unchecked Interface (`consultUnchecked(token, amountIn)`):**
+     Clearly labeled as `Unchecked` with explicit NatSpec warnings. Retained strictly for off-chain indexing, analytics, and historical backtesting where timestamp filtering occurs off-chain. Security-sensitive consumers MUST NOT call this method.
+* **AMM Pair Cumulative Price Accumulator Isolation:**
+  The AMM pair's internal timestamp arithmetic (`blockTimestampLast` as `uint32`) is maintained separately for canonical Uniswap v2 cumulative accumulator calculations modulo $2^{32}$. The pair's modular rollover does not interfere with the oracle's full-width freshness validation.
 * **Residual Risks:**
   1. Calling `consultUnchecked` bypasses all freshness validation. Any on-chain DeFi protocol integrating `consultUnchecked` is exposed to stale-price arbitrage.
-  2. Freshness enforcement cannot detect observation dormancy exceeding $2^{32}$ seconds (~136.19 years) due to `uint32` timestamp aliasing.
+  2. Keepers must still invoke `update()` periodically for the oracle to report fresh TWAP values.
 * **Regression Tests ([`test/dex/AdversarialSecurityAudit.t.sol`](../test/dex/AdversarialSecurityAudit.t.sol)):**
   - `test_Adversarial_StaleObservationReturnedWhenUpdateNeglected`: Proves that 30-day stale data causes `consult(token, amount)` to revert with `StalePrice(30 days, 2 * period)`, `consult(token, amount, 1 days)` to revert with `StalePrice(30 days, 1 days)`, while `consultUnchecked` returns the stale price.
   - `test_Adversarial_DualInterfaceStaleEnforcement`: Proves all 3 entry points return identical values when fresh, and fail-closed methods revert when age exceeds limits.
-  - `test_Adversarial_ObservationAgeWrapsAfter136Years`: Proves that warping $2^{32} + 10$ seconds wraps `observationAge()` to 10 seconds, demonstrating the modular aliasing limit.
+  - `test_Adversarial_ObservationOlderThan2ToThe32SecondsRevertsOnConsult`: Proves that warping $2^{32} + 10$ seconds into the future does not wrap the full-width observation age; the oracle correctly reports age $= 2^{32}+10$, classifies the observation as stale via `isStale(1 hours) == true`, and reverts with `StalePrice` on both default and parameterized `consult`.
   - `test_Adversarial_UninitializedOracleRevertsOnConsult`: Proves uninitialized oracles revert on all entry points with `OracleNotInitialized()`.
 
 ---
@@ -102,18 +105,24 @@ Consistent status definitions applied across the review:
 * **Status:** **Remediated**
 * **Technical Description:**
   The initial invariant fuzzing harness executed 50,000 actions without ever advancing EVM block time. Consequently, `timeElapsed` in the pair's `_update` remained 0, leaving cumulative price accumulators unexercised.
-  Furthermore, the previous invariant `invariant_PriceCumulativeMonotonic` asserted unconditional monotonicity (`assertGe(p0, lastP0)`). Because cumulative price accumulators are 256-bit unsigned integers that wrap modulo $2^{256}$, unconditional monotonicity is mathematically invalid in an unbounded domain.
+  Furthermore, asserting unconditional monotonicity of the raw reserve product $K = r_0 \cdot r_1$ is mathematically invalid because legitimate proportional liquidity removal (`removeLiquidity`) burns LP shares and redeems underlying pool assets, decreasing raw $K$. In addition, cumulative price accumulators wrap modulo $2^{256}$.
 * **Remediation Implemented:**
-  1. **Bounded Operational Idle Model:**
-     Added `MAX_HARNESS_IDLE_SECONDS = 30 days` to `AMMHandler`. All state-mutating pair actions (`swap0`, `swap1`, `addLiquidity`, `removeLiquidity`, `skim`, `sync`, `swapViaRouter`) record `lastPairActionTimestamp = block.timestamp;`.
-  2. **Active Time Warping:**
-     `warpTime(uint256 timeSeed)` advances time dynamically between 1 second and 1 day, while bounding cumulative idle time within `MAX_HARNESS_IDLE_SECONDS`.
-  3. **Verified Timestamp Consistency:**
-     Because idle time between interactions is strictly bounded to 30 days ($2,592,000\text{s} \ll 2^{31}$), the signed two's complement half-circle property `elapsed < 2^31` is guaranteed to hold for **every sequence permitted by the harness**, rather than relying on random fuzz distribution.
-  4. **Modular Cumulative Progress Property:**
-     Replaced unconditional monotonicity with `invariant_PriceCumulativeModularProgress`. Documented the non-wrapping domain assumption (accumulators start at 0 and do not exceed $2^{256}$ within 50,000 steps). Direct modular overflow across $2^{256}$ and $2^{32}$ rollover is independently verified via deterministic unit tests in `AdversarialSecurityAudit.t.sol`.
+  1. **Accounting-Aware Invariant (`invariant_KPerSharePreservedOrGrown`):**
+     Replaced unconditional raw $K$ monotonicity with reserve product per share unit:
+     $$K_{\text{per\_share}} = \left(\frac{r_0 \cdot 10^{18}}{\text{totalSupply}}\right) \times \left(\frac{r_1 \cdot 10^{18}}{\text{totalSupply}}\right)$$
+     Because proportional burns reduce reserves and shares identically, $K_{\text{per\_share}}$ is non-decreasing across all AMM operations (swaps grow it via retained 0.3% fees, donations grow it, mints and burns preserve it within fractional rounding dust).
+  2. **Swap-Specific Fee Accretion Invariants:**
+     In `AMMHandler`, actions `swap0`, `swap1`, and `swapViaRouter` explicitly assert that post-swap raw $K \ge \text{preK}$, ensuring fee growth on every individual swap transaction.
+  3. **Burn-Specific Consistency Invariants:**
+     In `AMMHandler.removeLiquidity`, post-burn $K_{\text{per\_share}}$ is asserted to be greater than or equal to pre-burn $K_{\text{per\_share}}$, confirming proportional asset accounting.
+  4. **Sensitivity & Vulnerability Detection Verification:**
+     In `test_Adversarial_KPerShareInvariantValidUnderLiquidityRemovalAndFailsOnExploit`, verified that while legitimate burns drop raw $K$ from peak while preserving $K_{\text{per\_share}}$, an exploit drain (e.g. callback reentrancy or unauthorized reserve extraction) collapses $K_{\text{per\_share}}$ by over 99%, confirming the invariant detects security breaches.
+  5. **Bounded Operational Idle Model & Active Time Warping:**
+     Added `MAX_HARNESS_IDLE_SECONDS = 30 days` to `AMMHandler`. All state-mutating pair actions record `lastPairActionTimestamp = block.timestamp;`. `warpTime(uint256 timeSeed)` advances time dynamically between 1 second and 1 day, while bounding cumulative idle time.
+  6. **Modular Cumulative Progress Property:**
+     Added `invariant_PriceCumulativeModularProgress` with documented non-wrapping domain assumptions. Direct modular overflow across $2^{256}$ and $2^{32}$ rollover is independently verified via deterministic unit tests.
 * **Verification:**
-  1,000 runs, 50,000 calls. `warpTime` was invoked **4,112 times** with 0 invariant violations across all 6 invariants.
+  1,000 runs, 50,000 calls. `warpTime` was invoked **4,130 times** with 0 invariant violations across all 6 invariants.
 
 ---
 
@@ -174,7 +183,13 @@ Consistent status definitions applied across the review:
      - **Alice:** Holds $\frac{1900 \cdot 10^{18} - 1000}{1900 \cdot 10^{18}}$ of remaining LP supply ($99.999999999999947\%$).
        Alice's claim on pool STD increased from 1,900 STD to $1904.761904\text{ STD}$ ($+\mathbf{4.761904\text{ STD}}$).
      - **DEAD_ADDRESS (`0xdead`):** Holds $1000\text{ wei}$ of LP supply.
-       Permanently locked minimum liquidity increased by $+2506\text{ wei STD}$.
+       The pro-rata claim on pool STD is:
+       $$\text{claim} = \frac{1000 \times 1904761904761904761905}{1900 \cdot 10^{18}} = \mathbf{1002\text{ wei STD}}$$
+       Permanently locked minimum liquidity increased by $+\mathbf{2\text{ wei STD}}$ (from 1000 wei to 1002 wei).
+       The theoretical continuous unrounded gain is:
+       $$\frac{1000}{1900 \cdot 10^{18}} \times \frac{100 \cdot 10^{18}}{21} = \frac{100000}{39900} \approx \mathbf{2.506265\text{ wei STD}}$$
+       which truncates under EVM integer division to **$2\text{ wei}$** (correcting the earlier typographical calculation that erroneously reported approximately $2,506\text{ wei}$).
+       Total socialized balance check: Alice Gain ($4761904761904760903$) + Dead Address Gain ($2$) = $\mathbf{4761904761904761905\text{ wei STD}} = \text{Bob Loss}$. Every single wei of socialized asset transfer is exactly accounted for and backed by test assertions in `test_Adversarial_FeeOnTransferLiquidityAsymmetry`.
   5. **Router Swaps:**
      In `test_Adversarial_RouterRejectsFeeOnTransferSwap`, swapping FoT tokens through the router reverts with `AviorAMMPairSecured.InvalidK.selector` because the fee deficit violates the constant-product check.
 * **Conclusion:** `AviorRouter` does not support Fee-on-Transfer tokens. Dedicated supporting routers (`swapExactTokensForTokensSupportingFeeOnTransferTokens`) are required.
@@ -219,10 +234,12 @@ Consistent status definitions applied across the review:
      `test_Adversarial_ZeroElapsedTimeInOracleAndPair` confirms back-to-back swaps in the same block ($timeElapsed == 0$) do not advance cumulative accumulators, and calling `oracle.update()` in the same block reverts with `PeriodNotElapsed(0, period)`.
   4. **Uninitialized Oracle Access:**
      `test_Adversarial_UninitializedOracleRevertsOnConsult` confirms calling `consult`, `consult(..., maxAge)`, or `consultUnchecked` prior to any update reverts with `OracleNotInitialized()`.
-  5. **136-Year Modular Age Aliasing:**
-     `test_Adversarial_ObservationAgeWrapsAfter136Years` proves that if an observation interval reaches $2^{32} + 10$ seconds (~136.19 years), `observationAge()` wraps to 10 seconds, misclassifying the observation as fresh.
+  5. **Full-Width Age Calculation Across $2^{32}$ Seconds:**
+     `test_Adversarial_ObservationOlderThan2ToThe32SecondsRevertsOnConsult` proves that with full-width `uint256 lastObservationTimestamp`, an observation older than $2^{32}$ seconds (~136.19 years) correctly reports age $= 2^{32}+10$ without modular wrap, is flagged as stale by `isStale(1 hours)`, and reverts with `StalePrice` on both default and parameterized `consult`.
   6. **Cumulative Modular Subtraction Across $2^{256}$:**
      Two's complement subtraction `unchecked { price0Cumulative - price0CumulativeLast }` accurately computes positive price growth even when the accumulator wraps across $2^{256}-1$.
+  7. **K Per Share Invariant Preservation & Exploit Drain Sensitivity:**
+     `test_Adversarial_KPerShareInvariantValidUnderLiquidityRemovalAndFailsOnExploit` proves that proportional liquidity burns legitimately drop raw $K$ from peak while preserving $K_{\text{per\_share}}$, and that an exploit drain collapses $K_{\text{per\_share}}$ by over 99%, confirming that the invariant suite reliably detects security breaches.
 
 ---
 
@@ -238,8 +255,8 @@ Foundry AST compiler analysis (`forge build`) was executed on all contracts:
 
 1. **Pull-Based TWAP Keeper Dependency & `consultUnchecked` Hazard:**
    `AviorTWAPOracle` requires regular updates. On-chain protocols MUST use `consult(token, amountIn, maxAge)` or the fail-closed default `consult(token, amountIn)` with an explicit staleness limit. Under no circumstances should lending or liquidation mechanisms invoke `consultUnchecked`.
-2. **136-Year Timestamp Wrap Assumption:**
-   `AviorTWAPOracle` relies on `uint32` modular arithmetic matching `pair.blockTimestampLast`. Automated keepers must invoke `update()` at least once per 136-year epoch to prevent age wrap-around aliasing.
+2. **AMM Pair Cumulative Price Accumulator Modular Wrap:**
+   While oracle freshness now tracks full-width `uint256` observation timestamps (eliminating freshness age aliasing), the AMM pair's cumulative price accumulator relies on canonical Uniswap v2 `uint32` modular arithmetic. If a pair receives no interaction for $\ge 2^{32}$ seconds (~136.19 years), cumulative price delta calculations wrap modulo $2^{32}$. Keepers must invoke updates within $2^{32}-1$ seconds of prior pool interactions.
 3. **Lack of Native Fee-on-Transfer Support in Router:**
    `AviorRouter.sol` does not support Fee-on-Transfer tokens. Deploying pairs with taxed tokens requires specialized wrapper routers.
 4. **Rebase Sync Automation:**
