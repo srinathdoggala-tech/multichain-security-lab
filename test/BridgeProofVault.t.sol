@@ -32,7 +32,6 @@ contract BridgeProofVaultTest is Test {
     }
 
     function test_BridgeProofForgeryExploit() public {
-
         address forgedTo = makeAddr("RECIPIENT_NODE");
         vm.deal(forgedTo, 0);
 

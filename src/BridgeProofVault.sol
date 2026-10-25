@@ -15,19 +15,15 @@ contract BridgeProofVault {
         root = _root;
     }
 
-    function withdrawBridgeFunds(
-        address to,
-        uint256 amount,
-        bytes32[] calldata proof
-    ) external {
+    function withdrawBridgeFunds(address to, uint256 amount, bytes32[] calldata proof) external {
         bytes32 leaf = keccak256(abi.encodePacked(to, amount));
-        
+
         if (!MerkleProof.verify(proof, root, leaf)) revert ProofInvalid();
         if (processedWithdrwals[leaf]) revert AlreadyProcessed();
 
         processedWithdrwals[leaf] = true;
 
-        (bool success, ) = to.call{value: amount}("");
+        (bool success,) = to.call{value: amount}("");
         if (!success) revert TransferFailed();
     }
 

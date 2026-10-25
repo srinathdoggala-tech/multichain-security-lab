@@ -33,7 +33,7 @@ contract AccountingDriftVault {
         uint256 assets = (shares * totalAssets) / totalShares;
 
         totalAssets -= assets;
-        (bool success, ) = msg.sender.call{value: assets}("");
+        (bool success,) = msg.sender.call{value: assets}("");
         require(success, "Transfer failed");
     }
 }

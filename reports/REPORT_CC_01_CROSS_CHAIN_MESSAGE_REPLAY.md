@@ -158,20 +158,26 @@ forge test -vvv --match-contract CrossChainMessageVaultRegressionTest
 ```
 Output:
 ```text
-Ran 4 tests for test/regressions/CrossChainMessageVaultRegression.t.sol:CrossChainMessageVaultRegressionTest
-[PASS] testFuzz_DestinationChainMismatchAlwaysReverts(uint256,uint256) (runs: 256, μ: 42566, ~: 42503)
+Ran 9 tests for test/regressions/CrossChainMessageVaultRegression.t.sol:CrossChainMessageVaultRegressionTest
+[PASS] testFuzz_DestinationChainMismatchAlwaysReverts(uint256,uint256) (runs: 256, μ: 42520, ~: 42471)
 [PASS] test_Regression_CrossChainReplayFailsOnDifferentChain() (gas: 197099)
 Logs:
   === REGRESSION CONFIRMED: CROSS-CHAIN REPLAY BLOCKED BY EIP-712 DOMAIN SEPARATION ===
 
-[PASS] test_Regression_SameChainDuplicateReplayFails() (gas: 183911)
-[PASS] test_Regression_ValidWithdrawalSucceedsOnTargetChain() (gas: 150276)
-Suite result: ok. 4 passed; 0 failed; 0 skipped; finished in 75.33ms
+[PASS] test_Regression_CrossContractReplayFailsOnSameChain() (gas: 64718)
+[PASS] test_Regression_FailedAttemptDoesNotAdvanceNonce() (gas: 220909)
+[PASS] test_Regression_MalformedSignatureReverts() (gas: 43830)
+[PASS] test_Regression_SameChainDuplicateReplayFails() (gas: 183934)
+[PASS] test_Regression_TamperedPayloadReverts() (gas: 103546)
+[PASS] test_Regression_UnauthorizedSignerReverts() (gas: 63022)
+[PASS] test_Regression_ValidWithdrawalSucceedsOnTargetChain() (gas: 150298)
+Suite result: ok. 9 passed; 0 failed; 0 skipped; finished in 116.68ms
 ```
-The test confirms that when an attacker captures a valid Ethereum signature and broadcasts it on BSC (ChainID 56), execution unconditionally reverts with `InvalidDestinationChain()` or `InvalidValidatorSignature()`, preserving 100% of BSC vault funds.
+The test confirms that when an attacker captures a valid Ethereum signature and broadcasts it on BSC (ChainID 56), execution unconditionally reverts with `InvalidDestinationChain()` or `InvalidValidatorSignature()`, preserving 100% of BSC vault funds. Cross-contract replays on the same chain and tampered payloads are similarly rejected.
 
 ---
 
 ## 8. Known Limitations & Residual Risks
 
-- **Validator Compromise:** EIP-712 prevents replay attacks across chains, but protocol security still depends on the validator key `0x7A21B...` remaining secure. A multi-signature validator set or proof-of-stake relayer committee is recommended for production.
+- **Validator Compromise:** EIP-712 prevents replay attacks across chains, but protocol security still depends on the validator key `0x7A21B...` remaining secure. A multi-signature validator set or proof-of-stake relayer committee is required for production.
+- **Deep Threat Analysis:** See [`docs/CROSS_CHAIN_THREAT_MODEL.md`](file:///c:/Users/dogga/My-first-smart-contract-audit-lab/docs/CROSS_CHAIN_THREAT_MODEL.md) for full STRIDE threat modeling, single-validator trust assumptions, and finality/reorganization risks.

@@ -40,7 +40,7 @@ contract CrossChainMessageVaultSecured is EIP712, ReentrancyGuard {
         uint256 nonce
     );
 
-    constructor(address _validator) EIP712("AviorCrossChainBridge", "1") payable {
+    constructor(address _validator) payable EIP712("AviorCrossChainBridge", "1") {
         if (_validator == address(0)) revert ZeroAddress();
         bridgeValidator = _validator;
     }
@@ -54,15 +54,7 @@ contract CrossChainMessageVaultSecured is EIP712, ReentrancyGuard {
         uint256 nonce
     ) public view returns (bytes32) {
         bytes32 structHash = keccak256(
-            abi.encode(
-                WITHDRAWAL_TYPEHASH,
-                sourceChainId,
-                destinationChainId,
-                address(this),
-                recipient,
-                amount,
-                nonce
-            )
+            abi.encode(WITHDRAWAL_TYPEHASH, sourceChainId, destinationChainId, address(this), recipient, amount, nonce)
         );
         return _hashTypedDataV4(structHash);
     }
@@ -81,15 +73,7 @@ contract CrossChainMessageVaultSecured is EIP712, ReentrancyGuard {
 
         // Compute typed data struct hash
         bytes32 structHash = keccak256(
-            abi.encode(
-                WITHDRAWAL_TYPEHASH,
-                sourceChainId,
-                destinationChainId,
-                address(this),
-                recipient,
-                amount,
-                nonce
-            )
+            abi.encode(WITHDRAWAL_TYPEHASH, sourceChainId, destinationChainId, address(this), recipient, amount, nonce)
         );
 
         // Compute EIP-712 digest incorporating domain separator (block.chainid and address(this))

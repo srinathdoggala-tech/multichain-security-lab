@@ -3,42 +3,74 @@ pragma solidity 0.8.28;
 
 import "forge-std/Test.sol";
 import "../../src/dex/AviorAMMPairSecured.sol";
+import "../../src/dex/AviorRouter.sol";
+import "../../src/dex/IAviorCallee.sol";
 import "../mocks/MockERC20.sol";
 
+/// @dev Malicious callee for testing callback reentrancy attempts in stateful testing
+contract InvariantReentrancyAttacker is IAviorCallee {
+    AviorAMMPairSecured public immutable targetPair;
+
+    constructor(address _targetPair) {
+        targetPair = AviorAMMPairSecured(_targetPair);
+    }
+
+    function aviorCall(address, uint256, uint256, bytes calldata data) external override {
+        uint8 action = abi.decode(data, (uint8));
+        // Attempt forbidden reentrancy on targetPair
+        if (action == 0) {
+            targetPair.swap(0, 1, address(this), "");
+        } else if (action == 1) {
+            targetPair.mint(address(this));
+        } else if (action == 2) {
+            targetPair.burn(address(this));
+        } else {
+            targetPair.sync();
+        }
+    }
+}
+
+/// @title AMMHandler - Stateful Invariant Action Handler for Avior AMM & Router
 contract AMMHandler is Test {
     AviorAMMPairSecured public immutable pair;
+    AviorRouter public immutable router;
     MockERC20 public immutable token0;
     MockERC20 public immutable token1;
+    InvariantReentrancyAttacker public immutable attackerCallee;
 
     address[] public actors;
-    uint256 public ghost_kLast;
     uint256 public successfulSwaps;
     uint256 public successfulMints;
     uint256 public successfulBurns;
+    uint256 public donationCount;
+    uint256 public skimCount;
+    uint256 public syncCount;
+    uint256 public failedSwapsCount;
+    uint256 public reentrancyBlockedCount;
+    uint256 public routerSwapsCount;
 
-    constructor(address _pair, address _token0, address _token1) {
+    constructor(address _pair, address _router, address _token0, address _token1) {
         pair = AviorAMMPairSecured(_pair);
+        router = AviorRouter(_router);
         token0 = MockERC20(_token0);
         token1 = MockERC20(_token1);
+        attackerCallee = new InvariantReentrancyAttacker(_pair);
 
         actors.push(makeAddr("ALICE"));
         actors.push(makeAddr("BOB"));
         actors.push(makeAddr("CHARLIE"));
-
-        (uint112 r0, uint112 r1,) = pair.getReserves();
-        ghost_kLast = uint256(r0) * uint256(r1);
     }
 
     function _getActor(uint256 seed) internal view returns (address) {
         return actors[seed % actors.length];
     }
 
+    /// @notice Action 1: Direct token0 swap
     function swap0(uint256 actorSeed, uint256 amountSeed) external {
         address actor = _getActor(actorSeed);
         (uint112 r0, uint112 r1,) = pair.getReserves();
         if (r0 < 1 ether || r1 < 1 ether) return;
 
-        // Bound swap to at most 30% of reserve0 to prevent excessive price slippage
         uint256 maxSwap = (uint256(r0) * 30) / 100;
         uint256 amount0In = bound(amountSeed, 1e14, maxSwap);
 
@@ -55,11 +87,10 @@ contract AMMHandler is Test {
         pair.swap(0, amount1Out, actor, bytes(""));
         vm.stopPrank();
 
-        (uint112 newR0, uint112 newR1,) = pair.getReserves();
-        ghost_kLast = uint256(newR0) * uint256(newR1);
         successfulSwaps++;
     }
 
+    /// @notice Action 2: Direct token1 swap
     function swap1(uint256 actorSeed, uint256 amountSeed) external {
         address actor = _getActor(actorSeed);
         (uint112 r0, uint112 r1,) = pair.getReserves();
@@ -81,11 +112,10 @@ contract AMMHandler is Test {
         pair.swap(amount0Out, 0, actor, bytes(""));
         vm.stopPrank();
 
-        (uint112 newR0, uint112 newR1,) = pair.getReserves();
-        ghost_kLast = uint256(newR0) * uint256(newR1);
         successfulSwaps++;
     }
 
+    /// @notice Action 3: Add liquidity
     function addLiquidity(uint256 actorSeed, uint256 amountSeed) external {
         address actor = _getActor(actorSeed);
         (uint112 r0, uint112 r1,) = pair.getReserves();
@@ -105,12 +135,11 @@ contract AMMHandler is Test {
         vm.stopPrank();
 
         if (shares > 0) {
-            (uint112 newR0, uint112 newR1,) = pair.getReserves();
-            ghost_kLast = uint256(newR0) * uint256(newR1);
             successfulMints++;
         }
     }
 
+    /// @notice Action 4: Remove liquidity
     function removeLiquidity(uint256 actorSeed, uint256 shareSeed) external {
         address actor = _getActor(actorSeed);
         uint256 userShares = pair.balanceOf(actor);
@@ -123,18 +152,120 @@ contract AMMHandler is Test {
         pair.burn(actor);
         vm.stopPrank();
 
-        (uint112 newR0, uint112 newR1,) = pair.getReserves();
-        ghost_kLast = uint256(newR0) * uint256(newR1);
         successfulBurns++;
     }
 
+    /// @notice Action 5: Direct unsolicited donation of tokens to pair
+    function donate(uint256 actorSeed, uint8 tokenChoice, uint256 amountSeed) external {
+        address actor = _getActor(actorSeed);
+        uint256 amount = bound(amountSeed, 1e14, 5 ether);
+        MockERC20 token = (tokenChoice % 2 == 0) ? token0 : token1;
+
+        token.mint(actor, amount);
+        vm.startPrank(actor);
+        token.transfer(address(pair), amount);
+        vm.stopPrank();
+
+        donationCount++;
+    }
+
+    /// @notice Action 6: Skim excess balance
+    function skim(uint256 actorSeed) external {
+        address actor = _getActor(actorSeed);
+        pair.skim(actor);
+        skimCount++;
+    }
+
+    /// @notice Action 7: Sync reserves to actual balances
     function sync() external {
         pair.sync();
+        syncCount++;
+    }
+
+    /// @notice Action 8: Failed swap attempting to extract excessive liquidity (must revert and not mutate state)
+    function failedSwapExcessiveOutput(uint256 actorSeed, uint256 amountSeed) external {
+        address actor = _getActor(actorSeed);
+        (uint112 r0,,) = pair.getReserves();
+        uint256 excessiveOut = uint256(r0) + bound(amountSeed, 1, 50 ether);
+
+        (uint112 pre0, uint112 pre1,) = pair.getReserves();
+        vm.startPrank(actor);
+        try pair.swap(excessiveOut, 0, actor, "") {
+            revert("Excessive swap should revert");
+        } catch {
+            failedSwapsCount++;
+        }
+        vm.stopPrank();
+
+        (uint112 post0, uint112 post1,) = pair.getReserves();
+        assertEq(pre0, post0, "Failed swap mutated reserve0");
+        assertEq(pre1, post1, "Failed swap mutated reserve1");
+    }
+
+    /// @notice Action 9: Failed swap requesting zero output (must revert)
+    function failedSwapZeroOutput(uint256 actorSeed) external {
+        address actor = _getActor(actorSeed);
+        (uint112 pre0, uint112 pre1,) = pair.getReserves();
+
+        vm.startPrank(actor);
+        try pair.swap(0, 0, actor, "") {
+            revert("Zero swap should revert");
+        } catch {
+            failedSwapsCount++;
+        }
+        vm.stopPrank();
+
+        (uint112 post0, uint112 post1,) = pair.getReserves();
+        assertEq(pre0, post0, "Zero output swap mutated reserve0");
+        assertEq(pre1, post1, "Zero output swap mutated reserve1");
+    }
+
+    /// @notice Action 10: Attempt reentrancy via flash-swap callback (must be cleanly blocked by ReentrancyGuard)
+    function attemptReentrantCallback(uint8 action) external {
+        (uint112 r0, uint112 r1,) = pair.getReserves();
+        if (r0 < 1 ether || r1 < 1 ether) return;
+
+        bytes memory callbackData = abi.encode(action % 4);
+        try pair.swap(0, 1 ether, address(attackerCallee), callbackData) {
+            // Must not succeed
+            revert("Reentrancy should revert");
+        } catch {
+            reentrancyBlockedCount++;
+        }
+    }
+
+    /// @notice Action 11: Execute swap via Router with slippage protection
+    function swapViaRouter(uint256 actorSeed, bool zeroForOne, uint256 amountSeed) external {
+        address actor = _getActor(actorSeed);
+        (uint112 r0, uint112 r1,) = pair.getReserves();
+        if (r0 < 1 ether || r1 < 1 ether) return;
+
+        (MockERC20 tIn, MockERC20 tOut, uint112 rIn) = zeroForOne ? (token0, token1, r0) : (token1, token0, r1);
+        uint256 amountIn = bound(amountSeed, 1e14, (uint256(rIn) * 20) / 100);
+
+        address[] memory path = new address[](2);
+        path[0] = address(tIn);
+        path[1] = address(tOut);
+
+        uint256[] memory amounts = router.getAmountsOut(amountIn, path);
+        if (amounts[1] == 0) return;
+
+        tIn.mint(actor, amountIn);
+        vm.startPrank(actor);
+        tIn.approve(address(router), amountIn);
+        uint256 preBal = tOut.balanceOf(actor);
+        router.swapExactTokensForTokens(amountIn, amounts[1], path, actor, block.timestamp + 100);
+        vm.stopPrank();
+
+        require(tOut.balanceOf(actor) - preBal >= amounts[1], "Router slippage invariant violated");
+        routerSwapsCount++;
     }
 }
 
+/// @title AviorAMMPairInvariantTest - Stateful Invariant Verification Suite
 contract AviorAMMPairInvariantTest is Test {
     AviorAMMPairSecured public pair;
+    AviorRouter public router;
     MockERC20 public token0;
     MockERC20 public token1;
     AMMHandler public handler;
@@ -148,6 +279,8 @@ contract AviorAMMPairInvariantTest is Test {
         }
 
         pair = new AviorAMMPairSecured(address(token0), address(token1));
+        router = new AviorRouter();
+        router.registerPair(address(token0), address(token1), address(pair));
 
         // Seed pool with initial liquidity: 100 ether each
         address bootstrap = makeAddr("BOOTSTRAP");
@@ -160,29 +293,27 @@ contract AviorAMMPairInvariantTest is Test {
         pair.mint(bootstrap);
         vm.stopPrank();
 
-        handler = new AMMHandler(address(pair), address(token0), address(token1));
+        handler = new AMMHandler(address(pair), address(router), address(token0), address(token1));
 
         // Target the stateful handler for fuzz iterations
         targetContract(address(handler));
     }
 
-    /// @notice Invariant 1: Constant-product K is monotonically non-decreasing over all swap operations
+    /// @notice Invariant 1: Constant-product K remains strictly positive across all valid transitions
     function invariant_KIsPreservedOrGrown() public view {
         (uint112 r0, uint112 r1,) = pair.getReserves();
         uint256 currentK = uint256(r0) * uint256(r1);
-        // Due to fee accumulation, K must always be at least as large as handler's ghost tracking
-        // (allowing for burns where liquidity is withdrawn proportionately)
         assertTrue(currentK > 0, "K invariant must remain positive");
     }
 
-    /// @notice Invariant 2: Pair ERC-20 balances always equal or exceed tracked internal reserves
+    /// @notice Invariant 2: Pair ERC-20 balances always equal or exceed stored reserves (backing guarantee)
     function invariant_ReservesCoveredByTokenBalances() public view {
         (uint112 r0, uint112 r1,) = pair.getReserves();
         assertGe(token0.balanceOf(address(pair)), uint256(r0), "Token0 balance must back reserve0");
         assertGe(token1.balanceOf(address(pair)), uint256(r1), "Token1 balance must back reserve1");
     }
 
-    /// @notice Invariant 3: Genesis MINIMUM_LIQUIDITY lock remains permanently burned in dead address
+    /// @notice Invariant 3: Genesis MINIMUM_LIQUIDITY lock remains permanently locked in dead address
     function invariant_PermanentMinimumLiquidityPreserved() public view {
         assertEq(
             pair.balanceOf(pair.DEAD_ADDRESS()),
@@ -190,5 +321,17 @@ contract AviorAMMPairInvariantTest is Test {
             "Dead address must permanently hold MINIMUM_LIQUIDITY"
         );
         assertGe(pair.totalSupply(), pair.MINIMUM_LIQUIDITY(), "Total supply cannot drop below minimum liquidity");
+    }
+
+    /// @notice Invariant 4: Non-depositors with zero LP shares cannot extract pool assets via burn
+    function invariant_ZeroSharesCannotBurnAssets() public {
+        address attacker = makeAddr("ZERO_SHARES_ATTACKER");
+        assertEq(pair.balanceOf(attacker), 0, "Attacker must have 0 shares");
+
+        vm.startPrank(attacker);
+        // Burning 0 transferred shares must revert or produce 0 output
+        vm.expectRevert();
+        pair.burn(attacker);
+        vm.stopPrank();
     }
 }
