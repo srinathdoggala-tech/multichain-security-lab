@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./IAviorCallee.sol";
+import "./libraries/UQ112x112.sol";
 
 /// @title AviorAMMPairSecured (Remediated Production-Grade DEX Core)
 /// @notice Implements standard constant-product AMM pair security controls:
@@ -12,7 +13,10 @@ import "./IAviorCallee.sol";
 ///         2. Strict fee-adjusted K-invariant validation: (1000*b0 - 3*in0) * (1000*b1 - 3*in1) >= 1000^2 * r0 * r1.
 ///         3. Permanent MINIMUM_LIQUIDITY (1000 units) dead-address lock on genesis mint.
 ///         4. Exact balance delta verification preventing donation and desynchronization exploits.
+///         5. Time-weighted average price (TWAP) accumulators (price0CumulativeLast, price1CumulativeLast).
 contract AviorAMMPairSecured is ERC20, ReentrancyGuard {
+    using UQ112x112 for uint224;
+
     uint256 public constant MINIMUM_LIQUIDITY = 1000;
     address public constant DEAD_ADDRESS = address(0x000000000000000000000000000000000000dEaD);
 
@@ -22,6 +26,9 @@ contract AviorAMMPairSecured is ERC20, ReentrancyGuard {
     uint112 private reserve0;
     uint112 private reserve1;
     uint32 private blockTimestampLast;
+
+    uint256 public price0CumulativeLast;
+    uint256 public price1CumulativeLast;
 
     error InsufficientLiquidityMinted();
     error InsufficientLiquidityBurned();
@@ -57,9 +64,23 @@ contract AviorAMMPairSecured is ERC20, ReentrancyGuard {
 
     function _update(uint256 balance0, uint256 balance1) private {
         require(balance0 <= type(uint112).max && balance1 <= type(uint112).max, "Overflow");
+
+        uint32 blockTimestamp = uint32(block.timestamp % 2 ** 32);
+        uint32 timeElapsed;
+        unchecked {
+            timeElapsed = blockTimestamp - blockTimestampLast;
+        }
+
+        if (timeElapsed > 0 && reserve0 != 0 && reserve1 != 0) {
+            unchecked {
+                price0CumulativeLast += uint256(UQ112x112.uqdiv(UQ112x112.encode(reserve1), reserve0)) * timeElapsed;
+                price1CumulativeLast += uint256(UQ112x112.uqdiv(UQ112x112.encode(reserve0), reserve1)) * timeElapsed;
+            }
+        }
+
         reserve0 = uint112(balance0);
         reserve1 = uint112(balance1);
-        blockTimestampLast = uint32(block.timestamp);
+        blockTimestampLast = blockTimestamp;
         emit Sync(reserve0, reserve1);
     }
 

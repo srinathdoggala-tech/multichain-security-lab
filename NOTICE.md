@@ -28,32 +28,43 @@ The following files and prototypes were inherited from the upstream repository:
 - `src/ReadOnlyAttack.sol`, `test/ReadOnlyTest.t.sol`, `src/VulnerableShares.sol`, `test/VulnerableSharesTest.t.sol` (Lab 15: Read-Only Reentrancy & Fuzzing)
 - `src/ArbitrageVault.sol`, `test/ArbitrageTest.t.sol` (Lab 16: Arbitrage)
 - `src/SignatureVault.sol`, `src/SignatureReplayVault.sol`, `test/SignatureAttack.t.sol`, `test/SignatureReplayVault.t.sol` (Lab 17: Signature Replay)
-- `src/BridgeProofVault.sol`, `test/BridgeProofVault.t.sol` (Lab 18: Bridge Merkle Verification)
-- `src/CrossChainMessageVault.sol`, `test/CrossChainMessageVault.t.sol` (Lab 19: Cross-Chain Message Replay Flaw)
-- `src/AccountingDriftVault.sol`, `src/AccountingDriftVaultFixed.sol`, `test/AccountingDriftVault.t.sol` (Lab 20: Accounting Drift & Invariants)
+### 2. Adapted Demonstrations (Labs 19-20)
+The following modules were adapted from canonical DeFi vulnerability patterns (cross-chain replay, vault drift) and expanded with concrete exploit test cases:
+- `src/CrossChainMessageVault.sol`, `test/CrossChainMessageVault.t.sol` (Demonstrating missing chain/nonce tracking)
+- `src/AccountingDriftVault.sol`, `src/AccountingDriftVaultFixed.sol`, `test/AccountingDriftVault.t.sol` (Demonstrating share-to-asset balance drift and 100% solvency restoration)
 
 ---
 
-### 2. Newly Authored Original Research & Engineering
-The following modules, tests, invariant suites, and audit reports were authored independently for this project:
+### 3. Newly Authored Original Research, Architecture & Advanced Security Labs
+The following modules, invariant suites, adversarial test suites, oracles, and audit reports were authored independently for this project:
 
 #### A. DEX & AMM Core Security Lab (`src/dex/`, `test/dex/`, `test/invariants/`)
 - `src/dex/IAviorCallee.sol`: Flash swap callback interface.
 - `src/dex/AviorAMMPair.sol`: Educational AMM core demonstrating flash swap callback reentrancy and flawed fee-omitting K checks.
-- `src/dex/AviorAMMPairSecured.sol`: Remediated AMM pair implementing OpenZeppelin `ReentrancyGuard`, isolated `_validateK` pure helper preventing stack-too-deep, strict 0.3% fee-adjusted K-invariant, and genesis `MINIMUM_LIQUIDITY` (1000) dead lock.
-- `src/dex/AviorRouter.sol`: Educational multi-hop AMM router supporting exact-input swaps, `amountOutMin` slippage enforcement, deadline validation, pair registry, and safe token transfers.
-- `test/mocks/MockERC20.sol`: Test helper mock token.
+- `src/dex/AviorAMMPairSecured.sol`: Remediated AMM pair implementing OpenZeppelin `ReentrancyGuard`, isolated `_validateK` pure helper preventing stack-too-deep, strict 0.3% fee-adjusted K-invariant, cumulative price accumulators (`price0CumulativeLast`, `price1CumulativeLast`), and genesis `MINIMUM_LIQUIDITY` (1000) dead lock.
+- `src/dex/libraries/UQ112x112.sol`: Binary fixed-point math library for AMM time-weighted cumulative prices.
+- `src/dex/AviorTWAPOracle.sol`: Time-Weighted Average Price (TWAP) oracle module providing manipulation resistance against single-block flash loan exploits via price accumulators, time-delta snapshots, and spot divergence consultation.
+- `src/dex/AviorRouter.sol`: Educational multi-hop AMM router supporting exact-input swaps, `amountOutMin` slippage enforcement, deadline validation, pair registry, optimal liquidity provisioning (`addLiquidity`), liquidity burning (`removeLiquidity`), and SafeERC20 asset transfers.
+- `test/mocks/MockERC20.sol`: Standard ERC-20 test helper mock token.
 - `test/dex/AviorAMMPairExploit.t.sol`: Reproducible proof of concept for callback reentrancy draining reserves and genesis share inflation.
-- `test/dex/AviorRouter.t.sol`: Unit test verifying single-hop and multi-hop routing (`tokenA -> tokenB -> tokenC`).
+- `test/dex/AviorRouter.t.sol`: Unit test verifying single-hop, multi-hop routing (`tokenA -> tokenB -> tokenC`), optimal liquidity addition, and liquidity burning.
+- `test/dex/AviorTWAPOracle.t.sol`: Unit and regression test suite verifying TWAP window enforcement, mathematical convergence, single-block flash-loan manipulation immunity, and invalid token protection.
 - `test/regressions/AviorAMMPairRegression.t.sol`: Regression test verifying reentrancy blocking, fee enforcement, and K-invariant property fuzzing.
 - `test/regressions/AviorRouterRegression.t.sol`: Comprehensive regression and adversarial test suite for router slippage violations, expired deadlines, invalid paths, and 1 wei dust rounding edge cases.
 - `test/invariants/AviorAMMPairInvariant.t.sol`: Stateful invariant test using Foundry `AMMHandler` asserting K-growth, reserve backing, dead-address lock, and zero-share burn protection across 1,000 runs and 50,000 calls.
 
-#### B. Cross-Chain Security Hardening (`src/crosschain/`, `test/regressions/`)
+#### B. Adversarial ERC-20 Token Behavior Research (`test/mocks/`, `test/dex/`)
+- `test/mocks/FeeOnTransferToken.sol`: Deflationary token deducting 5% on transfers, demonstrating AMM balance-delta vs router naive expectation desync.
+- `test/mocks/RebasingToken.sol`: Elastic-supply token demonstrating that positive rebases allow arbitrageurs to extract unearned LP yield via `skim()`, while negative rebases force reserve drops on `sync()`.
+- `test/mocks/MissingReturnToken.sol`: Non-standard USDT/BNB-style token omitting boolean returns, validating `SafeERC20` necessity.
+- `test/mocks/ReentrantHookToken.sol`: ERC-777/ERC-1363 callback token demonstrating that non-reentrant guards prevent transfer-hook reentrancy into AMM pools and routers.
+- `test/dex/AdversarialTokens.t.sol`: End-to-end test suite confirming pool and router behavior against all 4 adversarial token models.
+
+#### C. Cross-Chain Security Hardening (`src/crosschain/`, `test/regressions/`)
 - `src/crosschain/CrossChainMessageVaultSecured.sol`: Remediated bridge endpoint using EIP-712 typed structured data, explicit `block.chainid` destination validation, contract address binding, and per-user monotonic nonces.
 - `test/regressions/CrossChainMessageVaultRegression.t.sol`: Regression test proving cross-chain replay across Chain 1 (Ethereum) and Chain 56 (BSC), cross-contract replay, payload tampering, unauthorized signers, and malformed signatures are unconditionally rejected.
 
-#### C. Formal Security Audit Reports & Architecture Docs (`reports/`, `docs/`)
+#### D. Formal Security Audit Reports & Architecture Docs (`reports/`, `docs/`)
 - `docs/INITIAL_ASSESSMENT.md`: Rigorous pre-development assessment of repository toolchain, discrepancies, and baselines.
 - `docs/SECOND_PHASE_REVIEW.md`: Independent audit of the implemented system, compilation, and security findings.
 - `docs/AMM_SECURITY_REVIEW.md`: Line-by-line AMM re-audit, invariant derivations, and residual risk analysis.

@@ -139,4 +139,78 @@ contract AviorRouter {
         address recipient = i < path.length - 2 ? pairFor(output, path[i + 2]) : to;
         AviorAMMPairSecured(pair).swap(amount0Out, amount1Out, recipient, new bytes(0));
     }
+
+    /// @dev Internal view helper to calculate optimal liquidity amounts avoiding stack-too-deep
+    function _calculateLiquidityAmounts(
+        address pair,
+        address tokenA,
+        uint256 amountADesired,
+        uint256 amountBDesired,
+        uint256 amountAMin,
+        uint256 amountBMin
+    ) internal view returns (uint256 amountA, uint256 amountB) {
+        (uint112 reserve0, uint112 reserve1,) = AviorAMMPairSecured(pair).getReserves();
+        address token0 = AviorAMMPairSecured(pair).token0();
+        (uint256 reserveA, uint256 reserveB) = tokenA == token0 ? (reserve0, reserve1) : (reserve1, reserve0);
+
+        if (reserveA == 0 && reserveB == 0) {
+            (amountA, amountB) = (amountADesired, amountBDesired);
+        } else {
+            uint256 amountBOptimal = quote(amountADesired, reserveA, reserveB);
+            if (amountBOptimal <= amountBDesired) {
+                if (amountBOptimal < amountBMin) revert InsufficientOutputAmount(amountBMin, amountBOptimal);
+                (amountA, amountB) = (amountADesired, amountBOptimal);
+            } else {
+                uint256 amountAOptimal = quote(amountBDesired, reserveB, reserveA);
+                if (amountAOptimal < amountAMin) revert InsufficientOutputAmount(amountAMin, amountAOptimal);
+                (amountA, amountB) = (amountAOptimal, amountBDesired);
+            }
+        }
+    }
+
+    /// @dev Internal helper to execute transfers and minting avoiding local variable stack pressure
+    function _depositAndMint(address pair, address tokenA, address tokenB, uint256 amountA, uint256 amountB, address to)
+        internal
+        returns (uint256 liquidity)
+    {
+        IERC20(tokenA).safeTransferFrom(msg.sender, pair, amountA);
+        IERC20(tokenB).safeTransferFrom(msg.sender, pair, amountB);
+        liquidity = AviorAMMPairSecured(pair).mint(to);
+    }
+
+    /// @notice Adds liquidity to an AMM pair with optimal ratio calculation, slippage checks, and SafeERC20 transfers
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 amountADesired,
+        uint256 amountBDesired,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline
+    ) external ensure(deadline) returns (uint256 amountA, uint256 amountB, uint256 liquidity) {
+        (amountA, amountB) = _calculateLiquidityAmounts(
+                pairFor(tokenA, tokenB), tokenA, amountADesired, amountBDesired, amountAMin, amountBMin
+            );
+        liquidity = _depositAndMint(pairFor(tokenA, tokenB), tokenA, tokenB, amountA, amountB, to);
+    }
+
+    /// @notice Removes liquidity from an AMM pair with minimum return guarantees
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 liquidity,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline
+    ) external ensure(deadline) returns (uint256 amountA, uint256 amountB) {
+        address pair = pairFor(tokenA, tokenB);
+        IERC20(pair).safeTransferFrom(msg.sender, pair, liquidity);
+        (uint256 amount0, uint256 amount1) = AviorAMMPairSecured(pair).burn(to);
+        address token0 = AviorAMMPairSecured(pair).token0();
+        (amountA, amountB) = tokenA == token0 ? (amount0, amount1) : (amount1, amount0);
+        if (amountA < amountAMin) revert InsufficientOutputAmount(amountAMin, amountA);
+        if (amountB < amountBMin) revert InsufficientOutputAmount(amountBMin, amountB);
+    }
 }
