@@ -341,14 +341,28 @@ contract AviorAMMPairInvariantTest is Test {
         vm.stopPrank();
     }
 
-    /// @notice Invariant 5: Stored pair blockTimestampLast is always <= current block.timestamp (cast to uint32)
+    uint256 public lastPrice0Cumulative;
+    uint256 public lastPrice1Cumulative;
+
+    /// @notice Invariant 5: Time-weighted price cumulative accumulators are strictly monotonic non-decreasing
+    function invariant_PriceCumulativeMonotonic() public {
+        uint256 p0 = pair.price0CumulativeLast();
+        uint256 p1 = pair.price1CumulativeLast();
+        assertGe(p0, lastPrice0Cumulative, "price0Cumulative must be monotonically non-decreasing");
+        assertGe(p1, lastPrice1Cumulative, "price1Cumulative must be monotonically non-decreasing");
+        lastPrice0Cumulative = p0;
+        lastPrice1Cumulative = p1;
+    }
+
+    /// @notice Invariant 6: Stored blockTimestampLast is strictly non-future relative to the EVM clock
     function invariant_TimestampConsistency() public view {
         (,, uint32 blockTimestampLast) = pair.getReserves();
-        uint32 currentTimestamp = uint32(block.timestamp);
-        // If currentTimestamp rolled over, modular distance currentTimestamp - blockTimestampLast should be valid
-        assertTrue(
-            currentTimestamp >= blockTimestampLast || (uint32(block.timestamp) - blockTimestampLast < 100_000_000),
-            "Stored timestamp must be consistent with EVM clock"
-        );
+        uint32 currentTimestamp32 = uint32(block.timestamp % 2 ** 32);
+        uint32 elapsed;
+        unchecked {
+            elapsed = currentTimestamp32 - blockTimestampLast;
+        }
+        // Standard two's complement half-circle invariant: elapsed must not appear in the future (< 2^31)
+        assertTrue(elapsed < type(uint32).max / 2, "Stored timestamp must not be in the future");
     }
 }

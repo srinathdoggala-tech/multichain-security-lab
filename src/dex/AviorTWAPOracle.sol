@@ -102,7 +102,6 @@ contract AviorTWAPOracle {
         emit OracleUpdated(price0Average, price1Average, blockTimestampLast, price0Cumulative, price1Cumulative);
     }
 
-    /// @notice Computes expected output amount based on current TWAP average
     /// @notice Returns the age (in seconds) of the current TWAP price observation
     function observationAge() public view returns (uint32 age) {
         unchecked {
@@ -110,7 +109,15 @@ contract AviorTWAPOracle {
         }
     }
 
-    /// @notice Computes expected output amount based on current TWAP average
+    /// @notice Returns true if the observation age exceeds maxAge seconds
+    function isStale(uint256 maxAge) external view returns (bool) {
+        return observationAge() > maxAge;
+    }
+
+    /// @notice Computes expected output amount based on the last recorded TWAP snapshot without staleness enforcement
+    /// @dev WARNING: This function does NOT validate observation age. If keepers fail to update the oracle,
+    ///      it will return historical prices. Security-sensitive integrations (e.g., lending collateral,
+    ///      liquidations) MUST use `consult(address token, uint256 amountIn, uint256 maxAge)` instead.
     /// @param token Input token address (must be token0 or token1)
     /// @param amountIn Amount of input token
     /// @return amountOut Converted amount of counter-asset based on TWAP
@@ -129,6 +136,7 @@ contract AviorTWAPOracle {
     }
 
     /// @notice Computes expected output amount with explicit maximum staleness validation
+    /// @dev Reverts with `StalePrice` if `observationAge() > maxAge`. Recommended entry point for on-chain DeFi protocols.
     /// @param token Input token address (must be token0 or token1)
     /// @param amountIn Amount of input token
     /// @param maxAge Maximum acceptable elapsed time (in seconds) since last oracle snapshot

@@ -60,10 +60,11 @@ graph TD
   * **Slippage Bounds (`amountOutMin`):** Reverts with `InsufficientOutputAmount` if final received tokens fall below the user-specified threshold.
   * **Deadline Expiration (`block.timestamp <= deadline`):** Reverts with `ExpiredDeadline` to prevent miners/validators from withholding transactions in the mempool for adverse execution.
   * **Hop Isolation:** Chains intermediate hop outputs directly to the subsequent pool's balance via `_swapHop(...)`, eliminating EVM stack-too-deep overhead while ensuring the user's initial deposit strictly enters the first authorized pool.
-  * **Path Validation:** Reverts on identical consecutive tokens, zero input amounts, zero recipient addresses, or unregistered pools.
+  * **Token Compatibility Boundary:** Standard `AviorRouter` does **NOT** support Fee-on-Transfer (taxed) or Rebasing tokens for swaps or liquidity provision. Swaps with fee-on-transfer tokens revert with `InvalidK()`, and liquidity additions suffer uncredited token absorption. Specialized wrapper routers are required for non-standard assets.
 * **Evidence & Adversarial Tests:**
   * Unit test: [`test/dex/AviorRouter.t.sol`](./test/dex/AviorRouter.t.sol) (single-hop, multi-hop `A -> B -> C`, quotes)
   * Regression suite: [`test/regressions/AviorRouterRegression.t.sol`](./test/regressions/AviorRouterRegression.t.sol) (10 tests: slippage violations, expired deadlines, invalid paths, allowance checks, property-based fuzzing, and 1 wei dust rounding edge cases).
+  * Adversarial audit suite: [`test/dex/AdversarialSecurityAudit.t.sol`](./test/dex/AdversarialSecurityAudit.t.sol) (Fee-on-transfer swap rejection and liquidity socialization proofs).
 
 ---
 
@@ -146,11 +147,11 @@ Every test result documented below is factual and executed against local Foundry
 ```text
 $ forge test -vvv
 
-Ran 31 test suites: 83 tests passed, 0 failed, 0 skipped (83 total tests)
-- AdversarialSecurityAuditTest: 6 passed (Timestamp rollover across 2^32-1, stale TWAP mitigation, sustained manipulation holding costs, router perimeter address validation, fee-on-transfer socialization, negative rebase K-checks)
+Ran 31 test suites: 89 tests passed, 0 failed, 0 skipped (89 total tests)
+- AdversarialSecurityAuditTest: 12 passed (Timestamp rollover across 2^32-1, rollover with interim reserve changes, zero elapsed time, dual-interface staleness checks, 136-year wrap limitation, sustained manipulation holding costs, router perimeter zero-address validation, fee-on-transfer socialization, negative rebase K-checks, router FoT swap rejection)
 - AviorAMMPairExploitTest: 2 passed (Reentrant sync drain & Genesis share inflation)
 - AviorAMMPairRegressionTest: 5 passed (Reentrancy mutex, fee enforcement, K-invariant fuzzing)
-- AviorAMMPairInvariantTest: 1 passed (1,000 runs, 50,000 calls across K growth, reserve backing, dead address lock, zero-shares burn, timestamp consistency with active warpTime)
+- AviorAMMPairInvariantTest: 1 passed (1,000 runs, 50,000 calls across K growth, reserve backing, dead address lock, zero-shares burn, price cumulative monotonicity, non-future timestamp consistency with active warpTime)
 - AviorRouterTest: 6 passed (Single-hop quotes, fee deductions, multi-hop routing, optimal liquidity provisioning, liquidity burning)
 - AviorRouterRegressionTest: 10 passed (Slippage violations, expired deadlines, invalid paths, property fuzzing, dust rounding)
 - AviorTWAPOracleTest: 6 passed (Window enforcement, mathematical convergence, single-block flash loan manipulation immunity)

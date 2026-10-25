@@ -381,4 +381,182 @@ contract AdversarialSecurityAuditTest is Test {
 
         assertGt(validOut, 0);
     }
+
+    // =========================================================================
+    // 7. ROBUST ROLLOVER WITH INTERIM RESERVE SHIFTS
+    // =========================================================================
+
+    /// @notice Tests cumulative price piece-wise integration when reserves change across uint32 rollover
+    function test_Adversarial_RolloverWithInterimReserveChanges() public {
+        uint256 preRolloverTimestamp = (uint256(1) << 32) - 100;
+        vm.warp(preRolloverTimestamp);
+
+        pair.sync();
+        oracle.update();
+
+        // 50 seconds before rollover, execute a swap altering reserves
+        vm.warp(preRolloverTimestamp + 50); // t = 2^32 - 50
+        token0.mint(bob, 1_000 ether);
+        vm.startPrank(bob);
+        token0.transfer(address(pair), 1_000 ether);
+        uint256 amount1Out = router.getAmountOut(1_000 ether, 1_000 ether, 1_000 ether);
+        pair.swap(0, amount1Out, bob, "");
+        vm.stopPrank();
+
+        // Warp across rollover boundary to post-rollover timestamp 1750
+        // Total elapsed time = 50s (pre-swap at 1:1) + 1800s (post-swap at skewed) = 1850s
+        uint256 postRolloverTimestamp = preRolloverTimestamp + 1850;
+        vm.warp(postRolloverTimestamp);
+
+        // Update oracle across the rollover boundary
+        oracle.update();
+
+        // Verify that oracle price reflects the piece-wise weighted average:
+        // 50s at 1.0, 1800s at ~0.25 (reserve1 ~ 500, reserve0 ~ 2000)
+        uint256 twapPrice = oracle.consult(address(token0), 100 ether);
+        // Weighted average: (50 * 100 + 1800 * 25) / 1850 = (5000 + 45000) / 1850 = ~27 ether
+        assertApproxEqAbs(twapPrice, 27 ether, 2 ether);
+    }
+
+    // =========================================================================
+    // 8. ZERO ELAPSED TIME IN PAIR AND ORACLE
+    // =========================================================================
+
+    /// @notice Verifies that zero elapsed time between transactions does not corrupt accumulators or allow oracle re-updates
+    function test_Adversarial_ZeroElapsedTimeInOracleAndPair() public {
+        vm.warp(block.timestamp + PERIOD);
+        oracle.update();
+
+        // Calling update again in the same block reverts with PeriodNotElapsed(0, period)
+        vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.PeriodNotElapsed.selector, 0, PERIOD));
+        oracle.update();
+
+        // Execute first swap at current timestamp
+        token0.mint(alice, 20 ether);
+        vm.startPrank(alice);
+        token0.transfer(address(pair), 10 ether);
+        uint256 out = router.getAmountOut(10 ether, 1_000 ether, 1_000 ether);
+        pair.swap(0, out, alice, "");
+
+        // Capture cumulative accumulator after first swap
+        uint256 p0AfterFirstSwap = pair.price0CumulativeLast();
+
+        // Immediately execute a SECOND swap in the exact same block / timestamp (timeElapsed == 0)
+        (uint112 r0, uint112 r1,) = pair.getReserves();
+        token0.transfer(address(pair), 10 ether);
+        uint256 out2 = router.getAmountOut(10 ether, r0, r1);
+        pair.swap(0, out2, alice, "");
+        vm.stopPrank();
+
+        uint256 p0AfterSecondSwap = pair.price0CumulativeLast();
+        assertEq(p0AfterFirstSwap, p0AfterSecondSwap, "Cumulative price must not advance on zero elapsed time");
+    }
+
+    // =========================================================================
+    // 9. UNINITIALIZED ORACLE CANNOT REPORT FALSE AVERAGES
+    // =========================================================================
+
+    /// @notice Verifies that an uninitialized oracle reverts on consult rather than reporting zero or default
+    function test_Adversarial_UninitializedOracleRevertsOnConsult() public {
+        AviorTWAPOracle freshOracle = new AviorTWAPOracle(address(pair), PERIOD);
+
+        // Calling consult before any update reverts with OracleNotInitialized
+        vm.expectRevert(AviorTWAPOracle.OracleNotInitialized.selector);
+        freshOracle.consult(address(token0), 100 ether);
+
+        vm.expectRevert(AviorTWAPOracle.OracleNotInitialized.selector);
+        freshOracle.consult(address(token0), 100 ether, 1 hours);
+    }
+
+    // =========================================================================
+    // 10. DUAL INTERFACE STALENESS ENFORCEMENT & IS_STALE HELPER
+    // =========================================================================
+
+    /// @notice Compares consult(token, amount) vs consult(token, amount, maxAge) and isStale helper
+    function test_Adversarial_DualInterfaceStaleEnforcement() public {
+        vm.warp(block.timestamp + PERIOD);
+        oracle.update();
+
+        // Immediately after update, age is 0
+        assertEq(oracle.observationAge(), 0);
+        assertFalse(oracle.isStale(1 hours));
+
+        // Both interfaces return identical quotes when fresh
+        uint256 uncheckedFresh = oracle.consult(address(token0), 100 ether);
+        uint256 checkedFresh = oracle.consult(address(token0), 100 ether, 1 hours);
+        assertEq(uncheckedFresh, checkedFresh);
+        assertEq(uncheckedFresh, 100 ether);
+
+        // Warp 2 hours past update
+        vm.warp(block.timestamp + 2 hours);
+        assertEq(oracle.observationAge(), 2 hours);
+        assertTrue(oracle.isStale(1 hours));
+
+        // The checked interface reverts with StalePrice
+        vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.StalePrice.selector, 2 hours, 1 hours));
+        oracle.consult(address(token0), 100 ether, 1 hours);
+
+        // The unchecked interface returns the stale quote (documenting its integration hazard)
+        uint256 uncheckedStale = oracle.consult(address(token0), 100 ether);
+        assertEq(uncheckedStale, 100 ether);
+    }
+
+    // =========================================================================
+    // 11. LONG ELAPSED INTERVAL (> 2^32 SECONDS) MODULAR WRAP LIMITATION
+    // =========================================================================
+
+    /// @notice Demonstrates the 136-year uint32 wrap limitation: interval >= 2^32 wraps modulo 2^32
+    function test_Adversarial_LongElapsedIntervalAnalysis() public {
+        vm.warp(block.timestamp + PERIOD);
+        oracle.update();
+
+        // Warp 2^32 + 500 seconds into the future (136 years + 500s)
+        uint256 hugeTime = block.timestamp + (uint256(1) << 32) + 500;
+        vm.warp(hugeTime);
+
+        // Modular distance: (hugeTime % 2^32) - (blockTimestampLast % 2^32) == 500
+        // Because 500 < PERIOD (1800), oracle.update() reverts with PeriodNotElapsed(500, 1800)
+        vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.PeriodNotElapsed.selector, 500, PERIOD));
+        oracle.update();
+    }
+
+    // =========================================================================
+    // 12. ROUTER REJECTS FEE-ON-TRANSFER SWAPS WITH INVALID_K
+    // =========================================================================
+
+    /// @notice Confirms that standard router swaps of fee-on-transfer tokens fail with InvalidK
+    function test_Adversarial_RouterRejectsFeeOnTransferSwap() public {
+        FeeOnTransferToken fot = new FeeOnTransferToken("Taxed", "TAX", 500, makeAddr("TAX_RECIPIENT"));
+        MockERC20 standard = new MockERC20("Standard", "STD", 18);
+
+        address t0 = address(fot) < address(standard) ? address(fot) : address(standard);
+        address t1 = address(fot) < address(standard) ? address(standard) : address(fot);
+
+        AviorAMMPairSecured fotPair = new AviorAMMPairSecured(t0, t1);
+        router.registerPair(address(fot), address(standard), address(fotPair));
+
+        fot.mint(alice, 10_000 ether);
+        standard.mint(alice, 10_000 ether);
+
+        vm.startPrank(alice);
+        fot.transfer(address(fotPair), 1_900 ether);
+        standard.transfer(address(fotPair), 1_900 ether);
+        fotPair.mint(alice);
+        vm.stopPrank();
+
+        // Bob attempts to swap 100 FoT for standard tokens via router
+        fot.mint(bob, 100 ether);
+        vm.startPrank(bob);
+        fot.approve(address(router), 100 ether);
+
+        address[] memory path = new address[](2);
+        path[0] = address(fot);
+        path[1] = address(standard);
+
+        // When router transfers 100 FoT, pair only receives 95.
+        // Because router calculates amountOut based on 100 in, the pair's K-invariant check fails!
+        vm.expectRevert(AviorAMMPairSecured.InvalidK.selector);
+        router.swapExactTokensForTokens(100 ether, 1 ether, path, bob, block.timestamp + 100);
+        vm.stopPrank();
+    }
 }
