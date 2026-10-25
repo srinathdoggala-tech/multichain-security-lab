@@ -1,0 +1,23 @@
+name: Foundry Tests
+on: [push, pull_request]
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Build Contracts
+        run: forge build
+
+      - name: Run Full Test Suite
+        run: forge test -vvv --no-match-contract InvariantTestVulnerable
