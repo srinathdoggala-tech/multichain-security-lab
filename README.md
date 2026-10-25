@@ -67,7 +67,32 @@ graph TD
 
 ---
 
-### 3. Multi-Chain Bridge Message Verification (`src/crosschain/`)
+### 3. Manipulation-Resistant TWAP Oracle Module (`src/dex/`)
+* **Vulnerability Context:**
+  * Protocols that rely on instantaneous AMM spot reserves (`reserve1 / reserve0`) for collateral valuation or liquidation pricing are inherently vulnerable to single-block flash loan manipulation (e.g., bZx, Harvest Finance).
+* **Secured Architecture:** [`src/dex/AviorTWAPOracle.sol`](./src/dex/AviorTWAPOracle.sol)
+  * Implements time-weighted average price (TWAP) calculation leveraging cumulative price accumulators in [`src/dex/AviorAMMPairSecured.sol`](./src/dex/AviorAMMPairSecured.sol) and fixed-point math [`src/dex/libraries/UQ112x112.sol`](./src/dex/libraries/UQ112x112.sol).
+  * Enforces minimum observation period (`PERIOD = 1800s`), preventing intra-block updates.
+  * Extrapolates current price accumulators forward across un-traded block intervals, securing downstream protocols against flash loan distortion.
+* **Evidence:**
+  * [`test/dex/AviorTWAPOracle.t.sol`](./test/dex/AviorTWAPOracle.t.sol) (6 tests: period elapsed enforcement, multi-period weighted convergence, flash-loan 10x spot distortion immunity, and invalid token protection).
+
+---
+
+### 4. Adversarial ERC-20 Token Integration Suite (`test/mocks/`, `test/dex/`)
+* **Vulnerability Context:**
+  * Real-world DeFi protocols regularly suffer severe exploits due to non-standard or adversarial token behaviors that break standard ERC-20 assumptions.
+* **Adversarial Scenarios Tested & Proven:**
+  1. **Fee-on-Transfer (FoT) Tokens ([`FeeOnTransferToken.sol`](./test/mocks/FeeOnTransferToken.sol)):** Proves that while [`AviorAMMPairSecured`](./src/dex/AviorAMMPairSecured.sol) safely calculates actual received token deltas for direct swaps, naive routers assuming full receipt suffer `InvalidK` reverts.
+  2. **Rebasing / Elastic Supply Tokens ([`RebasingToken.sol`](./test/mocks/RebasingToken.sol)):** Demonstrates that positive supply expansions allow arbitrageurs to extract unearned LP yield via `pair.skim()`, while negative rebases force reserve drops on `pair.sync()`.
+  3. **Missing Return Value Tokens ([`MissingReturnToken.sol`](./test/mocks/MissingReturnToken.sol)):** Validates that non-compliant tokens (like mainnet USDT) that omit boolean returns revert under naive interfaces but execute safely via OpenZeppelin `SafeERC20` in [`AviorRouter`](./src/dex/AviorRouter.sol).
+  4. **Callback Reentrant Tokens ([`ReentrantHookToken.sol`](./test/mocks/ReentrantHookToken.sol)):** Proves that ERC-777/ERC-1363 transfer callback hooks attempting to reenter pool functions (`swap`, `mint`, `skim`, `sync`) are blocked by `ReentrancyGuard`.
+* **Evidence:**
+  * [`test/dex/AdversarialTokens.t.sol`](./test/dex/AdversarialTokens.t.sol) (6 passing tests).
+
+---
+
+### 5. Multi-Chain Bridge Message Verification (`src/crosschain/`)
 * **Vulnerability Demonstrated:**
   * **Cross-Chain Signature Replay:** In [`src/CrossChainMessageVault.sol`](./src/CrossChainMessageVault.sol), validator signatures are computed over raw hashes `keccak256(abi.encodePacked(to, amount, nonce))` without binding `block.chainid` or `address(this)`. A signature issued for an authorized withdrawal on Ethereum (ChainID 1) is captured and replayed directly against the BSC (ChainID 56) vault instance, draining the entire secondary treasury.
 * **Secured Implementation:** [`src/crosschain/CrossChainMessageVaultSecured.sol`](./src/crosschain/CrossChainMessageVaultSecured.sol) implements OpenZeppelin `EIP712` structured domain separation, explicit destination chain validation (`destinationChainId == block.chainid`), verifying contract binding, message ID idempotency, and monotonic per-user nonces.
@@ -79,7 +104,7 @@ graph TD
 
 ---
 
-### 4. Share-Based Vault Accounting Drift (`src/`)
+### 6. Share-Based Vault Accounting Drift (`src/`)
 * **Vulnerability Demonstrated:**
   * **Write-Before-Read Share Ordering:** In [`src/AccountingDriftVault.sol`](./src/AccountingDriftVault.sol), `withdraw()` mutates `totalShares -= shares` before evaluating `payout = (shares * balance) / totalShares`. The prematurely shrunken denominator overpays the withdrawer at the expense of remaining depositors, and bricks full withdrawals with division by zero.
 * **Secured Implementation:** [`src/AccountingDriftVaultFixed.sol`](./src/AccountingDriftVaultFixed.sol) computes payouts against pre-state snapshots prior to any state mutation.
@@ -90,9 +115,9 @@ graph TD
 
 ---
 
-### 5. Inherited Vulnerability Modules Matrix
+### 7. Inherited Vulnerability Modules Matrix
 
-In addition to the primary DEX, router, and cross-chain research labs, the repository maintains educational exploit modules inherited from the upstream project:
+In addition to the primary DEX, router, TWAP oracle, adversarial token suite, and cross-chain research labs, the repository maintains educational exploit modules inherited from the upstream project:
 
 | Lab ID | Category / Target | Flaw Description | Test Reference |
 | :--- | :--- | :--- | :--- |
@@ -121,12 +146,14 @@ Every test result documented below is factual and executed against local Foundry
 ```text
 $ forge test -vvv
 
-Ran 28 test suites: 63 tests passed, 0 failed, 0 skipped (63 total tests)
+Ran 30 test suites: 77 tests passed, 0 failed, 0 skipped (77 total tests)
 - AviorAMMPairExploitTest: 2 passed (Reentrant sync drain & Genesis share inflation)
 - AviorAMMPairRegressionTest: 5 passed (Reentrancy mutex, fee enforcement, K-invariant fuzzing)
 - AviorAMMPairInvariantTest: 1 passed (1,000 runs, 50,000 calls across K growth, reserve backing, dead address lock, zero-shares burn)
-- AviorRouterTest: 4 passed (Single-hop quotes, fee deductions, multi-hop routing)
+- AviorRouterTest: 6 passed (Single-hop quotes, fee deductions, multi-hop routing, optimal liquidity provisioning, liquidity burning)
 - AviorRouterRegressionTest: 10 passed (Slippage violations, expired deadlines, invalid paths, property fuzzing, dust rounding)
+- AviorTWAPOracleTest: 6 passed (Window enforcement, mathematical convergence, single-block flash loan manipulation immunity)
+- AdversarialTokensTest: 6 passed (Fee-on-transfer, positive rebase skim theft, negative rebase reserve drop, SafeERC20 missing returns, reentrant callback mutex)
 - CrossChainMessageVaultRegressionTest: 9 passed (Cross-chain replay, cross-contract replay, tampering, unauthorized signers, nonce atomicity)
 - AccountingDriftVaultTest & InvariantTest: 12 passed (Pro-rata conservation, multi-depositor fuzzing, 50,000 calls)
 - Inherited Labs: 20 passed (Baseline EVM vulnerability reproductions)

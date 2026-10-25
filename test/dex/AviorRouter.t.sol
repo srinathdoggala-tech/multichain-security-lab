@@ -123,4 +123,51 @@ contract AviorRouterTest is Test {
         assertEq(tokenC.balanceOf(bob), expectedFinalOut);
         assertEq(tokenA.balanceOf(alice), 0);
     }
+
+    /// @notice Test 5: Router addLiquidity transfers optimal amounts and mints LP tokens
+    function test_Router_AddLiquidityOptimal() public {
+        tokenA.mint(alice, 10 ether);
+        tokenB.mint(alice, 25 ether);
+
+        vm.startPrank(alice);
+        tokenA.approve(address(router), 10 ether);
+        tokenB.approve(address(router), 25 ether);
+
+        // At 100 : 200 ratio, 10 tokenA requires 20 tokenB
+        (uint256 amountA, uint256 amountB, uint256 liquidity) = router.addLiquidity(
+            address(tokenA), address(tokenB), 10 ether, 25 ether, 10 ether, 20 ether, alice, block.timestamp + 100
+        );
+        vm.stopPrank();
+
+        assertEq(amountA, 10 ether);
+        assertEq(amountB, 20 ether);
+        assertGt(liquidity, 0);
+        assertEq(pairAB.balanceOf(alice), liquidity);
+        // Alice should retain the leftover 5 tokenB
+        assertEq(tokenB.balanceOf(alice), 5 ether);
+    }
+
+    /// @notice Test 6: Router removeLiquidity burns LP tokens and returns underlying assets
+    function test_Router_RemoveLiquidity() public {
+        tokenA.mint(alice, 10 ether);
+        tokenB.mint(alice, 20 ether);
+
+        vm.startPrank(alice);
+        tokenA.approve(address(router), 10 ether);
+        tokenB.approve(address(router), 20 ether);
+        (,, uint256 liquidity) = router.addLiquidity(
+            address(tokenA), address(tokenB), 10 ether, 20 ether, 10 ether, 20 ether, alice, block.timestamp + 100
+        );
+
+        // Approve router for LP tokens and remove liquidity
+        pairAB.approve(address(router), liquidity);
+        (uint256 amountA, uint256 amountB) = router.removeLiquidity(
+            address(tokenA), address(tokenB), liquidity, 9 ether, 19 ether, alice, block.timestamp + 100
+        );
+        vm.stopPrank();
+
+        assertGe(amountA, 9 ether);
+        assertGe(amountB, 19 ether);
+        assertEq(pairAB.balanceOf(alice), 0);
+    }
 }
