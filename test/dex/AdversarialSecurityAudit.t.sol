@@ -521,17 +521,26 @@ contract AdversarialSecurityAuditTest is Test {
         assertEq(defaultFresh, uncheckedFresh);
         assertEq(defaultFresh, 100 ether);
 
-        // Warp 2 hours past update (2 hours > 1 hour maxAge and 2 hours > 2 * PERIOD default)
-        vm.warp(block.timestamp + 2 hours);
-        assertEq(oracle.observationAge(), 2 hours);
-        assertTrue(oracle.isStale(1 hours));
+        // Test boundary condition: observation age exactly equal to maxAge (1 hours = 3600s)
+        vm.warp(block.timestamp + 1 hours);
+        assertEq(oracle.observationAge(), 1 hours);
+        assertFalse(oracle.isStale(1 hours), "Observation at exactly maxAge is not stale");
+        uint256 boundaryFresh = oracle.consult(address(token0), 100 ether, 1 hours);
+        assertEq(boundaryFresh, 100 ether);
+        // Default consult tolerance is 2 * PERIOD = 1 hours: exactly at boundary
+        assertEq(oracle.consult(address(token0), 100 ether), 100 ether);
+
+        // Test boundary condition: observation age just outside maxAge (1 hours + 1 second)
+        vm.warp(block.timestamp + 1);
+        assertEq(oracle.observationAge(), 1 hours + 1);
+        assertTrue(oracle.isStale(1 hours), "Observation at maxAge + 1s is stale");
 
         // 1. The explicit checked interface reverts with StalePrice
-        vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.StalePrice.selector, 2 hours, 1 hours));
+        vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.StalePrice.selector, 1 hours + 1, 1 hours));
         oracle.consult(address(token0), 100 ether, 1 hours);
 
         // 2. The default consult interface is fail-closed (2 * PERIOD = 1 hour tolerance) and ALSO reverts
-        vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.StalePrice.selector, 2 hours, 2 * PERIOD));
+        vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.StalePrice.selector, 1 hours + 1, 2 * PERIOD));
         oracle.consult(address(token0), 100 ether);
 
         // 3. The unchecked interface returns the stale quote (documenting its integration hazard)

@@ -2,7 +2,7 @@ name: DeFiSentinel CI
 
 on:
   push:
-    branches: [main, feat/*]
+    branches: [main, feat/*, audit/*]
   pull_request:
     branches: [main]
 
