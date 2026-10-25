@@ -127,19 +127,23 @@ contract AdversarialSecurityAuditTest is Test {
 
         // Check instantaneous spot vs stale TWAP
         uint256 spotPrice = oracle.consultSpot(address(token0), 100 ether);
-        uint256 staleTWAPPrice = oracle.consult(address(token0), 100 ether);
 
         // Real market price is ~25 ether:
         assertApproxEqAbs(spotPrice, 25 ether, 1 ether);
 
-        // BUT consult() returns 100 ether (a 30-day stale observation!)
-        // Proving that protocols consuming consult() without staleness checks are vulnerable to stale price arbitrage
-        assertEq(staleTWAPPrice, 100 ether);
-
-        // Using our remediated consult(token, amount, maxAge) correctly reverts on staleness:
+        // 1. Calling default consult() (fail-closed with 2 * PERIOD tolerance) REVERTS with StalePrice
         assertEq(oracle.observationAge(), 30 days);
+        vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.StalePrice.selector, 30 days, 2 * PERIOD));
+        oracle.consult(address(token0), 100 ether);
+
+        // 2. Calling consult with explicit custom maxAge REVERTS with StalePrice
         vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.StalePrice.selector, 30 days, 1 days));
         oracle.consult(address(token0), 100 ether, 1 days);
+
+        // 3. Calling consultUnchecked() returns 100 ether (a 30-day stale observation!)
+        // Proving why consultUnchecked is explicitly separated and unsafe for lending collateral
+        uint256 staleTWAPPrice = oracle.consultUnchecked(address(token0), 100 ether);
+        assertEq(staleTWAPPrice, 100 ether);
 
         // Calling update() brings TWAP to the time-weighted reality
         oracle.update();
@@ -466,13 +470,16 @@ contract AdversarialSecurityAuditTest is Test {
 
         vm.expectRevert(AviorTWAPOracle.OracleNotInitialized.selector);
         freshOracle.consult(address(token0), 100 ether, 1 hours);
+
+        vm.expectRevert(AviorTWAPOracle.OracleNotInitialized.selector);
+        freshOracle.consultUnchecked(address(token0), 100 ether);
     }
 
     // =========================================================================
     // 10. DUAL INTERFACE STALENESS ENFORCEMENT & IS_STALE HELPER
     // =========================================================================
 
-    /// @notice Compares consult(token, amount) vs consult(token, amount, maxAge) and isStale helper
+    /// @notice Compares consult(token, amount) vs consult(token, amount, maxAge) and consultUnchecked
     function test_Adversarial_DualInterfaceStaleEnforcement() public {
         vm.warp(block.timestamp + PERIOD);
         oracle.update();
@@ -481,23 +488,29 @@ contract AdversarialSecurityAuditTest is Test {
         assertEq(oracle.observationAge(), 0);
         assertFalse(oracle.isStale(1 hours));
 
-        // Both interfaces return identical quotes when fresh
-        uint256 uncheckedFresh = oracle.consult(address(token0), 100 ether);
+        // All three interfaces return identical quotes when fresh
+        uint256 defaultFresh = oracle.consult(address(token0), 100 ether);
         uint256 checkedFresh = oracle.consult(address(token0), 100 ether, 1 hours);
-        assertEq(uncheckedFresh, checkedFresh);
-        assertEq(uncheckedFresh, 100 ether);
+        uint256 uncheckedFresh = oracle.consultUnchecked(address(token0), 100 ether);
+        assertEq(defaultFresh, checkedFresh);
+        assertEq(defaultFresh, uncheckedFresh);
+        assertEq(defaultFresh, 100 ether);
 
-        // Warp 2 hours past update
+        // Warp 2 hours past update (2 hours > 1 hour maxAge and 2 hours > 2 * PERIOD default)
         vm.warp(block.timestamp + 2 hours);
         assertEq(oracle.observationAge(), 2 hours);
         assertTrue(oracle.isStale(1 hours));
 
-        // The checked interface reverts with StalePrice
+        // 1. The explicit checked interface reverts with StalePrice
         vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.StalePrice.selector, 2 hours, 1 hours));
         oracle.consult(address(token0), 100 ether, 1 hours);
 
-        // The unchecked interface returns the stale quote (documenting its integration hazard)
-        uint256 uncheckedStale = oracle.consult(address(token0), 100 ether);
+        // 2. The default consult interface is fail-closed (2 * PERIOD = 1 hour tolerance) and ALSO reverts
+        vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.StalePrice.selector, 2 hours, 2 * PERIOD));
+        oracle.consult(address(token0), 100 ether);
+
+        // 3. The unchecked interface returns the stale quote (documenting its integration hazard)
+        uint256 uncheckedStale = oracle.consultUnchecked(address(token0), 100 ether);
         assertEq(uncheckedStale, 100 ether);
     }
 
@@ -518,6 +531,28 @@ contract AdversarialSecurityAuditTest is Test {
         // Because 500 < PERIOD (1800), oracle.update() reverts with PeriodNotElapsed(500, 1800)
         vm.expectRevert(abi.encodeWithSelector(AviorTWAPOracle.PeriodNotElapsed.selector, 500, PERIOD));
         oracle.update();
+    }
+
+    /// @notice Proves that after 2^32 seconds (~136.19 years), uint32 modular age wraps around,
+    ///         causing isStale() and consult(..., maxAge) to misclassify a 136-year-old observation as fresh.
+    function test_Adversarial_ObservationAgeWrapsAfter136Years() public {
+        vm.warp(block.timestamp + PERIOD);
+        oracle.update();
+
+        // Warp 2^32 + 10 seconds into the future
+        uint256 ancientTime = block.timestamp + (uint256(1) << 32) + 10;
+        vm.warp(ancientTime);
+
+        // Modular distance wraps around: uint32(ancientTime % 2^32) - t0 == 10
+        uint32 reportedAge = oracle.observationAge();
+        assertEq(reportedAge, 10, "Observation age wrapped modulo 2^32");
+
+        // isStale(3600) evaluates 10 > 3600 -> FALSE!
+        assertFalse(oracle.isStale(1 hours), "Ancient observation falsely classified as not stale");
+
+        // consult() with 1 hour maxAge succeeds because 10s < 1 hour!
+        uint256 ancientPrice = oracle.consult(address(token0), 100 ether, 1 hours);
+        assertEq(ancientPrice, 100 ether, "Ancient 136-year-old observation returned as valid");
     }
 
     // =========================================================================
