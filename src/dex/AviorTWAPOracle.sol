@@ -29,6 +29,7 @@ contract AviorTWAPOracle {
     error InvalidToken();
     error ZeroReserves();
     error OracleNotInitialized();
+    error StalePrice(uint32 age, uint256 maxAge);
 
     event OracleUpdated(
         uint224 price0Average,
@@ -102,10 +103,18 @@ contract AviorTWAPOracle {
     }
 
     /// @notice Computes expected output amount based on current TWAP average
+    /// @notice Returns the age (in seconds) of the current TWAP price observation
+    function observationAge() public view returns (uint32 age) {
+        unchecked {
+            age = uint32(block.timestamp % 2 ** 32) - blockTimestampLast;
+        }
+    }
+
+    /// @notice Computes expected output amount based on current TWAP average
     /// @param token Input token address (must be token0 or token1)
     /// @param amountIn Amount of input token
     /// @return amountOut Converted amount of counter-asset based on TWAP
-    function consult(address token, uint256 amountIn) external view returns (uint256 amountOut) {
+    function consult(address token, uint256 amountIn) public view returns (uint256 amountOut) {
         if (price0Average == 0 || price1Average == 0) revert OracleNotInitialized();
 
         if (token == token0) {
@@ -117,6 +126,17 @@ contract AviorTWAPOracle {
         } else {
             revert InvalidToken();
         }
+    }
+
+    /// @notice Computes expected output amount with explicit maximum staleness validation
+    /// @param token Input token address (must be token0 or token1)
+    /// @param amountIn Amount of input token
+    /// @param maxAge Maximum acceptable elapsed time (in seconds) since last oracle snapshot
+    /// @return amountOut Converted amount of counter-asset based on TWAP
+    function consult(address token, uint256 amountIn, uint256 maxAge) external view returns (uint256 amountOut) {
+        uint32 age = observationAge();
+        if (age > maxAge) revert StalePrice(age, maxAge);
+        return consult(token, amountIn);
     }
 
     /// @notice Computes instantaneous spot conversion using current reserves (for vulnerability / manipulation comparison)

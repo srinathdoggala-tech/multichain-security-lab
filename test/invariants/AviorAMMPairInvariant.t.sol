@@ -260,6 +260,12 @@ contract AMMHandler is Test {
         require(tOut.balanceOf(actor) - preBal >= amounts[1], "Router slippage invariant violated");
         routerSwapsCount++;
     }
+
+    /// @notice Action 12: Warp block timestamp forward to exercise cumulative price accumulators and rollover
+    function warpTime(uint256 timeSeed) external {
+        uint256 timeJump = bound(timeSeed, 1, 86400); // 1 second to 1 day
+        vm.warp(block.timestamp + timeJump);
+    }
 }
 
 /// @title AviorAMMPairInvariantTest - Stateful Invariant Verification Suite
@@ -333,5 +339,16 @@ contract AviorAMMPairInvariantTest is Test {
         vm.expectRevert();
         pair.burn(attacker);
         vm.stopPrank();
+    }
+
+    /// @notice Invariant 5: Stored pair blockTimestampLast is always <= current block.timestamp (cast to uint32)
+    function invariant_TimestampConsistency() public view {
+        (,, uint32 blockTimestampLast) = pair.getReserves();
+        uint32 currentTimestamp = uint32(block.timestamp);
+        // If currentTimestamp rolled over, modular distance currentTimestamp - blockTimestampLast should be valid
+        assertTrue(
+            currentTimestamp >= blockTimestampLast || (uint32(block.timestamp) - blockTimestampLast < 100_000_000),
+            "Stored timestamp must be consistent with EVM clock"
+        );
     }
 }

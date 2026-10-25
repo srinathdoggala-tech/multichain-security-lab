@@ -189,9 +189,10 @@ contract AviorRouter {
         address to,
         uint256 deadline
     ) external ensure(deadline) returns (uint256 amountA, uint256 amountB, uint256 liquidity) {
+        if (to == address(0)) revert ZeroAddress();
         (amountA, amountB) = _calculateLiquidityAmounts(
-                pairFor(tokenA, tokenB), tokenA, amountADesired, amountBDesired, amountAMin, amountBMin
-            );
+            pairFor(tokenA, tokenB), tokenA, amountADesired, amountBDesired, amountAMin, amountBMin
+        );
         liquidity = _depositAndMint(pairFor(tokenA, tokenB), tokenA, tokenB, amountA, amountB, to);
     }
 
@@ -205,6 +206,7 @@ contract AviorRouter {
         address to,
         uint256 deadline
     ) external ensure(deadline) returns (uint256 amountA, uint256 amountB) {
+        if (to == address(0)) revert ZeroAddress();
         address pair = pairFor(tokenA, tokenB);
         IERC20(pair).safeTransferFrom(msg.sender, pair, liquidity);
         (uint256 amount0, uint256 amount1) = AviorAMMPairSecured(pair).burn(to);
