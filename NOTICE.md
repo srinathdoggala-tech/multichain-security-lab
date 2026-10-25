@@ -40,18 +40,25 @@ The following modules, tests, invariant suites, and audit reports were authored 
 #### A. DEX & AMM Core Security Lab (`src/dex/`, `test/dex/`, `test/invariants/`)
 - `src/dex/IAviorCallee.sol`: Flash swap callback interface.
 - `src/dex/AviorAMMPair.sol`: Educational AMM core demonstrating flash swap callback reentrancy and flawed fee-omitting K checks.
-- `src/dex/AviorAMMPairSecured.sol`: Remediated AMM pair implementing OpenZeppelin `ReentrancyGuard`, strict 0.3% fee-adjusted K-invariant (`(1000*b0 - 3*in0)*(1000*b1 - 3*in1) >= 1000^2*r0*r1`), and genesis `MINIMUM_LIQUIDITY` (1000) dead lock.
+- `src/dex/AviorAMMPairSecured.sol`: Remediated AMM pair implementing OpenZeppelin `ReentrancyGuard`, isolated `_validateK` pure helper preventing stack-too-deep, strict 0.3% fee-adjusted K-invariant, and genesis `MINIMUM_LIQUIDITY` (1000) dead lock.
+- `src/dex/AviorRouter.sol`: Educational multi-hop AMM router supporting exact-input swaps, `amountOutMin` slippage enforcement, deadline validation, pair registry, and safe token transfers.
 - `test/mocks/MockERC20.sol`: Test helper mock token.
 - `test/dex/AviorAMMPairExploit.t.sol`: Reproducible proof of concept for callback reentrancy draining reserves and genesis share inflation.
+- `test/dex/AviorRouter.t.sol`: Unit test verifying single-hop and multi-hop routing (`tokenA -> tokenB -> tokenC`).
 - `test/regressions/AviorAMMPairRegression.t.sol`: Regression test verifying reentrancy blocking, fee enforcement, and K-invariant property fuzzing.
-- `test/invariants/AviorAMMPairInvariant.t.sol`: Stateful invariant test using Foundry `AMMHandler` asserting K-growth, reserve backing, and dead-address lock across 1,000 runs and 50,000 calls.
+- `test/regressions/AviorRouterRegression.t.sol`: Comprehensive regression and adversarial test suite for router slippage violations, expired deadlines, invalid paths, and 1 wei dust rounding edge cases.
+- `test/invariants/AviorAMMPairInvariant.t.sol`: Stateful invariant test using Foundry `AMMHandler` asserting K-growth, reserve backing, dead-address lock, and zero-share burn protection across 1,000 runs and 50,000 calls.
 
 #### B. Cross-Chain Security Hardening (`src/crosschain/`, `test/regressions/`)
 - `src/crosschain/CrossChainMessageVaultSecured.sol`: Remediated bridge endpoint using EIP-712 typed structured data, explicit `block.chainid` destination validation, contract address binding, and per-user monotonic nonces.
-- `test/regressions/CrossChainMessageVaultRegression.t.sol`: Regression test proving cross-chain replay across Chain 1 (Ethereum) and Chain 56 (BSC) is unconditionally rejected.
+- `test/regressions/CrossChainMessageVaultRegression.t.sol`: Regression test proving cross-chain replay across Chain 1 (Ethereum) and Chain 56 (BSC), cross-contract replay, payload tampering, unauthorized signers, and malformed signatures are unconditionally rejected.
 
-#### C. Formal Security Audit Reports (`reports/`, `docs/`)
+#### C. Formal Security Audit Reports & Architecture Docs (`reports/`, `docs/`)
 - `docs/INITIAL_ASSESSMENT.md`: Rigorous pre-development assessment of repository toolchain, discrepancies, and baselines.
+- `docs/SECOND_PHASE_REVIEW.md`: Independent audit of the implemented system, compilation, and security findings.
+- `docs/AMM_SECURITY_REVIEW.md`: Line-by-line AMM re-audit, invariant derivations, and residual risk analysis.
+- `docs/INVARIANTS.md`: Formal specification of AMM & DEX stateful invariants, handler action space, and verification logs.
+- `docs/CROSS_CHAIN_THREAT_MODEL.md`: Deep threat model covering STRIDE, EIP-712 domain separation, single-validator trust assumptions, and finality risks.
 - `reports/REPORT_TEMPLATE.md`: Standardized professional security reporting framework.
 - `reports/REPORT_DEX_01_AMM_REENTRANCY_RESERVE_DESYNC.md`: Comprehensive CVSS 9.8 report for flash swap reentrancy.
 - `reports/REPORT_CC_01_CROSS_CHAIN_MESSAGE_REPLAY.md`: Comprehensive CVSS 10.0 report for cross-chain validator replay.

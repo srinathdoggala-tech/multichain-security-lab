@@ -24,16 +24,16 @@ contract AccountingDriftVault {
     }
 
     function withdraw(uint256 shares) external {
-    require(balanceOf[msg.sender] >= shares, "Low shares balance");
-    require(shares > 0, "Zero shares");
+        require(balanceOf[msg.sender] >= shares, "Low shares balance");
+        require(shares > 0, "Zero shares");
 
-    uint256 assets = (shares * totalAssets) / totalShares;
+        uint256 assets = (shares * totalAssets) / totalShares;
 
-    balanceOf[msg.sender] -= shares;
-    totalShares -= shares;
-    totalAssets -= assets;
+        balanceOf[msg.sender] -= shares;
+        totalShares -= shares;
+        totalAssets -= assets;
 
-    (bool success, ) = msg.sender.call{value: assets}("");
-    require(success, "Transfer failed");
+        (bool success,) = msg.sender.call{value: assets}("");
+        require(success, "Transfer failed");
     }
 }

@@ -1,13 +1,18 @@
-name: Foundry Tests
-on: [push, pull_request]
+name: DeFiSentinel CI
+
+on:
+  push:
+    branches: [main, feat/*]
+  pull_request:
+    branches: [main]
 
 jobs:
-  check:
-    strategy:
-      fail-fast: false
+  test:
+    name: Foundry Test Suite & Invariants
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
         with:
           submodules: recursive
 
@@ -16,8 +21,37 @@ jobs:
         with:
           version: stable
 
-      - name: Build Contracts
-        run: forge build
+      - name: Check Formatting
+        run: forge fmt --check
 
-      - name: Run Full Test Suite
-        run: forge test -vvv --no-match-contract InvariantTestVulnerable
+      - name: Build Contracts
+        run: forge build --sizes
+
+      - name: Run Full Test Suite (Unit, Regression & Invariant Tests)
+        run: forge test -vvv
+
+      - name: Verify Intentional Vulnerability Fails (Proof-of-Bug Invariant)
+        run: |
+          echo "Running intentional vulnerability test InvariantTestVulnerable..."
+          if forge test -vvv --match-contract InvariantTestVulnerable --no-match-contract "^$"; then
+            echo "ERROR: Expected InvariantTestVulnerable to fail, but it passed!"
+            exit 1
+          else
+            echo "CONFIRMED: Intentional vulnerability properly detected and failed as designed."
+          fi
+
+  static-analysis:
+    name: Aderyn Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Aderyn
+        run: cargo install aderyn
+
+      - name: Run Aderyn Static Analyzer
+        run: aderyn .
+        continue-on-error: true

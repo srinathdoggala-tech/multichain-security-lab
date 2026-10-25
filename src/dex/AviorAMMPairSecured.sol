@@ -110,6 +110,8 @@ contract AviorAMMPairSecured is ERC20, ReentrancyGuard {
     /// @notice Remediated Swap: Protected by nonReentrant and verifies strict 0.3% fee adjusted K-invariant
     function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external nonReentrant {
         if (amount0Out == 0 && amount1Out == 0) revert InsufficientOutputAmount();
+        uint256 amount0In;
+        uint256 amount1In;
         uint256 balance0;
         uint256 balance1;
         {
@@ -126,20 +128,31 @@ contract AviorAMMPairSecured is ERC20, ReentrancyGuard {
             balance0 = IERC20(token0).balanceOf(address(this));
             balance1 = IERC20(token1).balanceOf(address(this));
 
-            uint256 amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0;
-            uint256 amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
+            amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0;
+            amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
             if (amount0In == 0 && amount1In == 0) revert InsufficientInputAmount();
 
-            // Exact Uniswap v2 0.3% fee-adjusted invariant
-            uint256 balance0Adjusted = (balance0 * 1000) - (amount0In * 3);
-            uint256 balance1Adjusted = (balance1 * 1000) - (amount1In * 3);
-            if (balance0Adjusted * balance1Adjusted < uint256(_reserve0) * uint256(_reserve1) * (1000 ** 2)) {
-                revert InvalidK();
-            }
+            _validateK(balance0, balance1, amount0In, amount1In, _reserve0, _reserve1);
         }
 
         _update(balance0, balance1);
-        emit Swap(msg.sender, 0, 0, amount0Out, amount1Out, to);
+        emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
+    }
+
+    /// @dev Internal pure helper to validate 0.3% fee-adjusted constant-product K without stack-too-deep
+    function _validateK(
+        uint256 balance0,
+        uint256 balance1,
+        uint256 amount0In,
+        uint256 amount1In,
+        uint112 _reserve0,
+        uint112 _reserve1
+    ) internal pure {
+        uint256 balance0Adjusted = (balance0 * 1000) - (amount0In * 3);
+        uint256 balance1Adjusted = (balance1 * 1000) - (amount1In * 3);
+        if (balance0Adjusted * balance1Adjusted < uint256(_reserve0) * uint256(_reserve1) * (1000 ** 2)) {
+            revert InvalidK();
+        }
     }
 
     /// @notice Remediated Sync: Protected against reentrancy
@@ -147,11 +160,17 @@ contract AviorAMMPairSecured is ERC20, ReentrancyGuard {
         _update(IERC20(token0).balanceOf(address(this)), IERC20(token1).balanceOf(address(this)));
     }
 
-    /// @notice Remediated Skim: Sends excess tokens to caller, protected against reentrancy
+    /// @notice Remediated Skim: Sends excess tokens to caller, protected against underflow and zero-transfer reverts
     function skim(address to) external nonReentrant {
         (uint112 _reserve0, uint112 _reserve1,) = getReserves();
-        _safeTransfer(token0, to, IERC20(token0).balanceOf(address(this)) - _reserve0);
-        _safeTransfer(token1, to, IERC20(token1).balanceOf(address(this)) - _reserve1);
+        uint256 balance0 = IERC20(token0).balanceOf(address(this));
+        uint256 balance1 = IERC20(token1).balanceOf(address(this));
+        if (balance0 > _reserve0) {
+            _safeTransfer(token0, to, balance0 - _reserve0);
+        }
+        if (balance1 > _reserve1) {
+            _safeTransfer(token1, to, balance1 - _reserve1);
+        }
     }
 
     function _safeTransfer(address token, address to, uint256 value) private {

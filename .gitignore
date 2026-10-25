@@ -19,3 +19,8 @@ out/
 .env
 .env.*
 !.env.example
+
+# Local tools and OS files
+.bin/
+.DS_Store
+*.swp

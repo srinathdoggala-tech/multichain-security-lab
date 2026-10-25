@@ -169,13 +169,78 @@ contract AccountingDriftVaultTest is Test {
         assertEq(attacker.balance - balBefore, expected);
         assertEq(fixedVault.totalShares(), fixedVault.totalAssets());
         assertEq(address(fixedVault).balance, fixedVault.totalAssets());
-        assertEq(
-            fixedVault.balanceOf(attacker) + fixedVault.balanceOf(victim),
-            fixedVault.totalShares()
-        );
+        assertEq(fixedVault.balanceOf(attacker) + fixedVault.balanceOf(victim), fixedVault.totalShares());
+    }
+
+    /// @notice Property: Single/last depositor withdrawing 100% of shares never reverts with division by zero
+    function test_Fixed_FullWithdrawalSucceedsWithoutDivisionByZero() public {
+        vm.prank(attacker);
+        fixedVault.deposit{value: 25 ether}();
+
+        assertEq(fixedVault.totalShares(), 25 ether);
+        assertEq(fixedVault.totalAssets(), 25 ether);
+
+        // In vulnerable vault, withdrawing 100% causes division by zero: (25e18 * 25e18) / (25e18 - 25e18) = div/0
+        // In fixed vault, this smoothly succeeds
+        uint256 attackerBalBefore = attacker.balance;
+        vm.prank(attacker);
+        fixedVault.withdraw(25 ether);
+
+        assertEq(attacker.balance - attackerBalBefore, 25 ether);
+        assertEq(fixedVault.totalShares(), 0);
+        assertEq(fixedVault.totalAssets(), 0);
+        assertEq(address(fixedVault).balance, 0);
+    }
+
+    /// @notice Property: Multi-depositor sequential withdrawals conserve 100% of assets with 0 residual dust
+    function testFuzz_Fixed_MultiDepositorSequentialWithdrawal(uint64 d1, uint64 d2, uint64 d3) public {
+        uint256 amt1 = bound(uint256(d1), 1 ether, 50 ether);
+        uint256 amt2 = bound(uint256(d2), 1 ether, 50 ether);
+        uint256 amt3 = bound(uint256(d3), 1 ether, 50 ether);
+
+        address user1 = makeAddr("USER_1");
+        address user2 = makeAddr("USER_2");
+        address user3 = makeAddr("USER_3");
+
+        vm.deal(user1, amt1);
+        vm.deal(user2, amt2);
+        vm.deal(user3, amt3);
+
+        vm.prank(user1);
+        fixedVault.deposit{value: amt1}();
+
+        vm.prank(user2);
+        fixedVault.deposit{value: amt2}();
+
+        vm.prank(user3);
+        fixedVault.deposit{value: amt3}();
+
+        assertEq(fixedVault.totalAssets(), amt1 + amt2 + amt3);
+        assertEq(fixedVault.totalShares(), amt1 + amt2 + amt3);
+
+        // Withdraw in reverse order
+        uint256 shares3 = fixedVault.balanceOf(user3);
+        vm.prank(user3);
+        fixedVault.withdraw(shares3);
+        assertEq(user3.balance, amt3);
+
+        uint256 shares2 = fixedVault.balanceOf(user2);
+        vm.prank(user2);
+        fixedVault.withdraw(shares2);
+        assertEq(user2.balance, amt2);
+
+        uint256 shares1 = fixedVault.balanceOf(user1);
+        vm.prank(user1);
+        fixedVault.withdraw(shares1);
+        assertEq(user1.balance, amt1);
+
+        assertEq(fixedVault.totalShares(), 0, "All shares must be liquidated");
+        assertEq(fixedVault.totalAssets(), 0, "All assets must be liquidated");
+        assertEq(address(fixedVault).balance, 0, "Zero ether residual dust");
     }
 }
-contract Handler is Test{
+
+contract Handler is Test {
     FixedVault vault;
 
     constructor(FixedVault v) {
@@ -183,11 +248,11 @@ contract Handler is Test{
     }
 
     function deposit(uint256 amountSeed) public {
-    if (address(this).balance < 1 ether) {
-        return;
-    }
-    uint256 amount = bound(amountSeed, 1 ether, address(this).balance);
-    vault.deposit{value: amount}();
+        if (address(this).balance < 1 ether) {
+            return;
+        }
+        uint256 amount = bound(amountSeed, 1 ether, address(this).balance);
+        vault.deposit{value: amount}();
     }
 
     function withdraw(uint256 sharesSeed) public {
@@ -198,22 +263,24 @@ contract Handler is Test{
         vault.withdraw(shares);
     }
 }
+
 contract InvariantTest is Test {
     FixedVault vault;
     Handler handler;
 
     function setUp() public {
-    vault = new FixedVault();
-    handler = new Handler(vault);
-    vm.deal(address(handler), 1000 ether);
-    targetContract(address(handler));
+        vault = new FixedVault();
+        handler = new Handler(vault);
+        vm.deal(address(handler), 1000 ether);
+        targetContract(address(handler));
     }
 
     function invariant_SharesEqualAssets() public {
         assertEq(vault.totalShares(), vault.totalAssets());
     }
 }
-contract Handler2 is Test{
+
+contract Handler2 is Test {
     VulnerableVault vault;
     address[] public depositors;
 
@@ -221,37 +288,38 @@ contract Handler2 is Test{
         vault = v2;
     }
 
-   function deposit(uint256 amountSeed, uint256 addressSeed) public {
-    address randomUser = address(uint160(addressSeed));
-    vm.deal(randomUser, 1000 ether);
+    function deposit(uint256 amountSeed, uint256 addressSeed) public {
+        address randomUser = address(uint160(addressSeed));
+        vm.deal(randomUser, 1000 ether);
 
-    if (randomUser.balance < 1 ether) {
-        return;
+        if (randomUser.balance < 1 ether) {
+            return;
+        }
+
+        uint256 amount = bound(amountSeed, 1 ether, randomUser.balance);
+        vm.prank(randomUser);
+        vault.deposit{value: amount}();
+        depositors.push(randomUser);
     }
-
-    uint256 amount = bound(amountSeed, 1 ether, randomUser.balance);
-    vm.prank(randomUser);
-    vault.deposit{value: amount}();
-    depositors.push(randomUser);
-}
 
     function withdraw(uint256 sharesSeed, uint256 indexSeed) public {
-    if (depositors.length == 0) {
-        return;
+        if (depositors.length == 0) {
+            return;
+        }
+
+        uint256 index = bound(indexSeed, 0, depositors.length - 1);
+        address randomUser = depositors[index];
+
+        if (vault.balanceOf(randomUser) == 0) {
+            return;
+        }
+
+        uint256 shares = bound(sharesSeed, 1, vault.balanceOf(randomUser));
+        vm.prank(randomUser);
+        vault.withdraw(shares);
     }
-
-    uint256 index = bound(indexSeed, 0, depositors.length - 1);
-    address randomUser = depositors[index];
-
-    if (vault.balanceOf(randomUser) == 0) {
-        return;
-    }
-
-    uint256 shares = bound(sharesSeed, 1, vault.balanceOf(randomUser));
-    vm.prank(randomUser);
-    vault.withdraw(shares);
 }
-}
+
 contract InvariantTestVulnerable is Test {
     VulnerableVault vault;
     Handler2 handler;
