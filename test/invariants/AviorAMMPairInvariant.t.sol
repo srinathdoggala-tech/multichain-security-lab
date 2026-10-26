@@ -368,8 +368,9 @@ contract AviorAMMPairInvariantTest is Test {
     ///      - Direct donations / skim: Physical donations do not change stored reserves until sync() or mint()/burn(); skim() leaves
     ///        stored reserves unaffected; sync() increases stored reserves to balances (>= r_i), ensuring Q_s' >= Q_s.
     ///      Scope & Assumptions: Standard ERC-20 conservation (no fee-on-transfer, rebasing, or external balance reduction);
-    ///      solvency (T >= MINIMUM_LIQUIDITY = 1000 permanently locked at DEAD_ADDRESS); test-domain total supply bound
-    ///      (T <= 2^128 - 1, guarding test calculation total * total from overflow, not an on-chain pair contract cap);
+    ///      solvency (T >= MINIMUM_LIQUIDITY = 1000 permanently locked at DEAD_ADDRESS); total supply bound
+    ///      (T <= sqrt(r0 * r1) < 2^112 << 2^128 - 1 is guaranteed inductively from genesis T_0^2 <= r0 * r1 and monotonic mints);
+    ///      require(total <= type(uint128).max) is retained as a defensive sanity guard for total * total squaring;
     ///      quotient bound: with scale 1e15, max quotient is bounded by (2^112 - 1)^2 * 1e15 / 1000^2 < 2^224 * 10^9 < 2^254 < 2^256 - 1,
     ///      guaranteeing Math.mulDiv quotient never overflows uint256 under any contract-reachable reserves and minimum supply.
     function invariant_KPerSharePreservedOrGrown() public {
