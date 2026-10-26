@@ -359,21 +359,24 @@ contract AviorAMMPairInvariantTest is Test {
     ///      is mathematically non-decreasing across all supported state transitions:
     ///      - Swaps: Total LP shares remain constant (T' = T); the 0.3% retained fee ensures post-swap
     ///        r0' * r1' >= r0 * r1, guaranteeing Q_s' >= Q_s without floor-boundary collapse.
-    ///      - Proportional liquidity mints: Floored share issuance L = min(floor(a0*T/r0), floor(a1*T/r1)) <= a_i*T/r_i
-    ///        ensures r_i' / T' >= r_i / T for both assets, hence Q' >= Q and Q_s' >= Q_s.
-    ///      - Proportional liquidity burns: Redeemed asset amounts are floored a_i = floor(liquidity * r_i / T) <= liquidity * r_i / T,
-    ///        ensuring remaining reserve density r_i' / T' >= r_i / T, hence Q' >= Q and Q_s' >= Q_s.
-    ///      - Direct donations / skim: Physical donations do not change stored reserves until sync(); skim() leaves
+    ///      - Proportional liquidity mints: Deposit amounts amount_i = balance_i - reserve_i absorb any prior unreserved
+    ///        surplus D_i. Floored share issuance L = min(floor(amount0*T/r0), floor(amount1*T/r1)) <= amount_i*T/r_i ensures
+    ///        r_i' / T' >= r_i / T for both assets, hence Q' >= Q and Q_s' >= Q_s.
+    ///      - Proportional liquidity burns: Redemption amounts are computed from physical token balances B_i = r_i + D_i (>= r_i):
+    ///        a_i = floor(liquidity * B_i / T) <= liquidity * B_i / T. Post-burn reserves update to remaining balances
+    ///        r_i' = B_i - a_i >= (r_i + D_i)(1 - liquidity / T), ensuring remaining asset density r_i' / T' >= (r_i + D_i) / T >= r_i / T.
+    ///      - Direct donations / skim: Physical donations do not change stored reserves until sync() or mint()/burn(); skim() leaves
     ///        stored reserves unaffected; sync() increases stored reserves to balances (>= r_i), ensuring Q_s' >= Q_s.
     ///      Scope & Assumptions: Standard ERC-20 conservation (no fee-on-transfer, rebasing, or external balance reduction);
-    ///      solvency (T >= MINIMUM_LIQUIDITY = 1000 permanently locked at DEAD_ADDRESS); total supply bound (T <= 2^128 - 1,
-    ///      ensuring checked total * total fits in uint256 without overflow); arithmetic computed via Math.mulDiv
-    ///      with 512-bit intermediate product to eliminate intermediate truncation or overflow.
+    ///      solvency (T >= MINIMUM_LIQUIDITY = 1000 permanently locked at DEAD_ADDRESS); test-domain total supply bound
+    ///      (T <= 2^128 - 1, guarding test calculation total * total from overflow, not an on-chain pair contract cap);
+    ///      arithmetic computed via Math.mulDiv with 512-bit intermediate product to eliminate intermediate truncation or overflow.
     function invariant_KPerSharePreservedOrGrown() public {
         (uint112 r0, uint112 r1,) = pair.getReserves();
         uint256 total = pair.totalSupply();
         require(total > 0, "Total supply must be positive");
-        require(total <= type(uint128).max, "Total supply exceeds safe non-overflow bound for total^2");
+        // Test-domain invariant guard: ensures total * total fits in uint256 for test calculation
+        require(total <= type(uint128).max, "Total supply exceeds test-domain bound for total^2");
 
         uint256 currentKPerShare = Math.mulDiv(uint256(r0) * uint256(r1), 1e18, total * total);
         assertGe(
