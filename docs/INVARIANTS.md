@@ -31,24 +31,24 @@ The `AMMHandler` models an adversarial multi-actor environment with 3 distinct u
 
 ---
 
-## 3. Formally Verified Invariants
+## 3. Stated System Properties & Invariant Specifications
 
 ### Invariant 1: Constant-Product $K$ Per Share Monotonicity (`invariant_KPerSharePreservedOrGrown`)
 - **Mathematical Intent:**
   $$\forall t_2 \ge t_1, \quad K_{\text{per\_share}}(t_2) \ge K_{\text{per\_share}}(t_1)$$
   where
   $$K_{\text{per\_share}} = \left\lfloor\frac{r_0 \cdot 10^{18}}{\mathcal{T}}\right\rfloor \times \left\lfloor\frac{r_1 \cdot 10^{18}}{\mathcal{T}}\right\rfloor$$
-- **Proof Rationale & EVM Integer Truncation:**
+- **Analytical Property Rationale & EVM Integer Truncation:**
   - **Swaps:** Total LP shares $\mathcal{T}$ remain constant; the 0.3% retained fee ensures post-swap $r_0' \cdot r_1' \ge r_0 \cdot r_1$, strictly growing $K_{\text{per\_share}}$.
   - **Mints (`pair.mint`):** Minted shares are floored: $\mathcal{L} = \min\left(\lfloor a_0 \mathcal{T} / r_0 \rfloor, \lfloor a_1 \mathcal{T} / r_1 \rfloor\right) \le a_0 \mathcal{T} / r_0$. Flooring new shares down reduces the new total supply $\mathcal{T}' = \mathcal{T} + \mathcal{L}$, ensuring $\frac{r_i'}{\mathcal{T}'} \ge \frac{r_i}{\mathcal{T}}$, rounding in favor of the pool.
-  - **Burns (`pair.burn`):** Redeemed asset amounts are floored: $a_i = \lfloor \mathcal{S} r_i / \mathcal{T} \rfloor \le \mathcal{S} r_i / \mathcal{T}$. Remaining reserves are $r_i' = r_i - a_i \ge r_i(1 - \mathcal{S}/\mathcal{T})$. Since remaining supply is $\mathcal{T}' = \mathcal{T}(1 - \mathcal{S}/\mathcal{T})$, asset density $\frac{r_i'}{\mathcal{T}'} \ge \frac{r_i}{\mathcal{T}}$ is non-decreasing. By floor monotonicity ($x \ge y \implies \lfloor x \rfloor \ge \lfloor y \rfloor$), $K_{\text{per\_share}}$ is non-decreasing across all burns.
+  - **Burns (`pair.burn`):** Redeemed asset amounts are floored: $a_i = \lfloor \mathcal{S} r_i / \mathcal{T} \rfloor \le \mathcal{S} r_i / \mathcal{T}$. Remaining reserves are $r_i' = r_i - a_i \ge r_i(1 - \mathcal{S}/\mathcal{T})$. Since remaining supply is $\mathcal{T}' = \mathcal{T}(1 - \mathcal{S}/\mathcal{T})$, asset density $\frac{r_i'}{\mathcal{T}'} \ge \frac{r_i}{\mathcal{T}}$ is non-decreasing. By floor monotonicity ($x \ge y \implies \lfloor x \rfloor \ge \lfloor y \rfloor$), $K_{\text{per\_share}}$ is non-decreasing across all burns under standard token accounting.
   - **Donations & Skim:** Token donations increase physical balances; `skim()` removes excess balance without modifying stored reserves; `sync()` updates stored reserves to balances ($\ge r_i$), preserving or growing reserve density.
-- **Assumptions & Preconditions:**
+- **Stated Assumptions & Operational Scope:**
   - Token balances conform to standard ERC-20 conservation without external decreases (non-rebasing, non-fee-on-transfer for stored pool balances).
   - Total supply never drops to zero ($\mathcal{T} \ge \text{MINIMUM\_LIQUIDITY} = 1000$ wei permanently locked at `DEAD_ADDRESS`).
 - **Relevant Handler Actions:** `swap0`, `swap1`, `addLiquidity`, `removeLiquidity`, `donate`, `skim`, `sync`, `swapViaRouter`.
 - **How Tested:** Checked via `invariant_KPerSharePreservedOrGrown()`.
-- **Empirical Status:** **VERIFIED** across 50,000 handler calls (1,000 runs, depth 50).
+- **Empirical Test Evidence:** Supported by 50,000 handler calls across 1,000 runs (depth 50) with zero violations observed in the explored parameter space.
 
 ---
 
@@ -61,7 +61,7 @@ The `AMMHandler` models an adversarial multi-actor environment with 3 distinct u
 - **Relevant Handler Actions:** `swap0`, `swap1`, `donate`, `skim`, `sync`, `failedSwapExcessiveOutput`.
 - **How Tested:** Checked via `invariant_ReservesCoveredByTokenBalances()`.
 - **Limitations:** Direct donations cause balances to temporarily exceed reserves until `sync()` or `skim()` is invoked. The invariant intentionally asserts $\ge$ to allow unreserved donations while ensuring under-collateralization is impossible.
-- **Empirical Status:** **VERIFIED** across 50,000 handler calls.
+- **Empirical Test Evidence:** Supported by 50,000 handler calls across 1,000 runs with zero violations observed under stated assumptions.
 
 ---
 
@@ -75,7 +75,7 @@ The `AMMHandler` models an adversarial multi-actor environment with 3 distinct u
 - **Relevant Handler Actions:** `addLiquidity`, `removeLiquidity`.
 - **How Tested:** Checked via `invariant_PermanentMinimumLiquidityPreserved()`.
 - **Limitations:** While minimum liquidity locking completely prevents share-price inflation from a zero-liquidity state, depositors depositing dust amounts after a massive donation may still experience rounding loss if they do not check minimum shares received.
-- **Empirical Status:** **VERIFIED** across 50,000 handler calls.
+- **Empirical Test Evidence:** Supported by 50,000 handler calls across 1,000 runs with zero violations observed under stated assumptions.
 
 ---
 
@@ -88,7 +88,7 @@ The `AMMHandler` models an adversarial multi-actor environment with 3 distinct u
 - **Relevant Handler Actions:** `removeLiquidity`, `failedSwapExcessiveOutput`.
 - **How Tested:** Verified via `invariant_ZeroSharesCannotBurnAssets()`.
 - **Limitations:** Only evaluates direct burning; flash-swap borrowing is governed by the $K$-invariant check.
-- **Empirical Status:** **VERIFIED** across 50,000 handler calls.
+- **Empirical Test Evidence:** Supported by 50,000 handler calls across 1,000 runs with zero violations observed under stated assumptions.
 
 ---
 
@@ -98,7 +98,7 @@ The `AMMHandler` models an adversarial multi-actor environment with 3 distinct u
   $$P_{\text{cum}}(t_2) \ge P_{\text{cum}}(t_1)$$
 - **Scope & Assumptions:** Holds within the non-wrapping domain over the bounded fuzz campaign. Rollover across $2^{32}$ seconds and overflow across $2^{256}$ are tested deterministically in `AdversarialSecurityAudit.t.sol`.
 - **How Tested:** Checked via `invariant_PriceCumulativeModularProgress()`.
-- **Empirical Status:** **VERIFIED** across 50,000 handler calls.
+- **Empirical Test Evidence:** Supported by 50,000 handler calls across 1,000 runs with zero violations observed within the non-wrapping domain.
 
 ---
 
@@ -108,7 +108,7 @@ The `AMMHandler` models an adversarial multi-actor environment with 3 distinct u
   $$\text{elapsed} \le \text{MAX\_HARNESS\_IDLE\_SECONDS} = 30\text{ days}$$
 - **Relevant Handler Actions:** All actions and `warpTime`.
 - **How Tested:** Checked via `invariant_TimestampConsistency()`.
-- **Empirical Status:** **VERIFIED** across 50,000 handler calls.
+- **Empirical Test Evidence:** Supported by 50,000 handler calls across 1,000 runs with zero violations observed within the operational idle bound.
 
 ---
 
