@@ -2,7 +2,7 @@ name: DeFiSentinel CI
 
 on:
   push:
-    branches: [main, feat/*]
+    branches: [main, feat/*, audit/*]
   pull_request:
     branches: [main]
 
@@ -33,11 +33,19 @@ jobs:
       - name: Verify Intentional Vulnerability Fails (Proof-of-Bug Invariant)
         run: |
           echo "Running intentional vulnerability test InvariantTestVulnerable..."
-          if forge test -vvv --match-contract InvariantTestVulnerable --no-match-contract "^$"; then
+          set +e
+          OUTPUT=$(forge test -vvv --match-contract InvariantTestVulnerable --no-match-contract "^$" 2>&1)
+          EXIT_CODE=$?
+          set -e
+          echo "$OUTPUT"
+          if [ $EXIT_CODE -eq 0 ]; then
             echo "ERROR: Expected InvariantTestVulnerable to fail, but it passed!"
             exit 1
-          else
+          elif echo "$OUTPUT" | grep -q "FAIL: assertion failed"; then
             echo "CONFIRMED: Intentional vulnerability properly detected and failed as designed."
+          else
+            echo "ERROR: Intentional vulnerability test failed due to an unrelated command error, not the expected assertion failure!"
+            exit 1
           fi
 
   static-analysis:

@@ -6,6 +6,7 @@ import "../../src/dex/AviorAMMPairSecured.sol";
 import "../../src/dex/AviorRouter.sol";
 import "../../src/dex/IAviorCallee.sol";
 import "../mocks/MockERC20.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @dev Malicious callee for testing callback reentrancy attempts in stateful testing
 contract InvariantReentrancyAttacker is IAviorCallee {
@@ -162,7 +163,7 @@ contract AMMHandler is Test {
         uint256 sharesToBurn = bound(shareSeed, 1, userShares);
         (uint112 preR0, uint112 preR1,) = pair.getReserves();
         uint256 preTotal = pair.totalSupply();
-        uint256 preKPerShare = (uint256(preR0) * 1e18 / preTotal) * (uint256(preR1) * 1e18 / preTotal);
+        uint256 preKPerShare = Math.mulDiv(uint256(preR0) * uint256(preR1), 1e15, preTotal * preTotal);
 
         vm.startPrank(actor);
         pair.transfer(address(pair), sharesToBurn);
@@ -171,8 +172,8 @@ contract AMMHandler is Test {
 
         (uint112 postR0, uint112 postR1,) = pair.getReserves();
         uint256 postTotal = pair.totalSupply();
-        uint256 postKPerShare = (uint256(postR0) * 1e18 / postTotal) * (uint256(postR1) * 1e18 / postTotal);
-        require(postKPerShare >= preKPerShare, "Burn must preserve or grow K per share");
+        uint256 postKPerShare = Math.mulDiv(uint256(postR0) * uint256(postR1), 1e15, postTotal * postTotal);
+        require(postKPerShare >= preKPerShare, "Burn must preserve or grow K per supply squared");
 
         lastPairActionTimestamp = block.timestamp;
         successfulBurns++;
@@ -347,25 +348,42 @@ contract AviorAMMPairInvariantTest is Test {
 
         (uint112 r0, uint112 r1,) = pair.getReserves();
         uint256 total = pair.totalSupply();
-        lastKPerShare = (uint256(r0) * 1e18 / total) * (uint256(r1) * 1e18 / total);
+        lastKPerShare = Math.mulDiv(uint256(r0) * uint256(r1), 1e15, total * total);
     }
 
     uint256 public lastKPerShare;
 
-    /// @notice Invariant 1: Constant-product reserve density per share unit ((r0/total) * (r1/total)) is monotonically non-decreasing
+    /// @notice Invariant 1: Constant-product reserve density per supply squared (floor(r0 * r1 * 1e15 / total^2)) is monotonically non-decreasing
     /// @dev Raw K = r0 * r1 legitimately decreases on removeLiquidity as assets exit the pool.
-    ///      However, the asset density per LP share is strictly non-decreasing:
-    ///      - Swaps accrete 0.3% fees, strictly increasing K / totalSupply^2.
-    ///      - Proportional liquidity mints leave K / totalSupply^2 invariant.
-    ///      - Proportional liquidity burns leave K / totalSupply^2 invariant (retaining fractional division dust).
-    ///      - Direct donations increase K / totalSupply^2.
+    ///      However, the single-floored scaled reserve product per supply squared Q_s = floor((r0 * r1 * 1e15) / total^2)
+    ///      is mathematically non-decreasing across all supported state transitions:
+    ///      - Swaps: Total LP shares remain constant (T' = T); the 0.3% retained fee ensures post-swap
+    ///        r0' * r1' >= r0 * r1, guaranteeing Q_s' >= Q_s without floor-boundary collapse.
+    ///      - Proportional liquidity mints: Deposit amounts amount_i = balance_i - reserve_i absorb any prior unreserved
+    ///        surplus D_i. Floored share issuance L = min(floor(amount0*T/r0), floor(amount1*T/r1)) <= amount_i*T/r_i ensures
+    ///        r_i' / T' >= r_i / T for both assets, hence Q' >= Q and Q_s' >= Q_s.
+    ///      - Proportional liquidity burns: Redemption amounts are computed from physical token balances B_i = r_i + D_i (>= r_i):
+    ///        a_i = floor(liquidity * B_i / T) <= liquidity * B_i / T. Post-burn reserves update to remaining balances
+    ///        r_i' = B_i - a_i >= (r_i + D_i)(1 - liquidity / T), ensuring remaining asset density r_i' / T' >= (r_i + D_i) / T >= r_i / T.
+    ///      - Direct donations / skim: Physical donations do not change stored reserves until sync() or mint()/burn(); skim() leaves
+    ///        stored reserves unaffected; sync() increases stored reserves to balances (>= r_i), ensuring Q_s' >= Q_s.
+    ///      Scope & Assumptions: Standard ERC-20 conservation (no fee-on-transfer, rebasing, or external balance reduction);
+    ///      solvency (T >= MINIMUM_LIQUIDITY = 1000 permanently locked at DEAD_ADDRESS); total supply bound
+    ///      (T <= sqrt(r0 * r1) < 2^112 << 2^128 - 1 is guaranteed inductively from genesis T_0^2 <= r0 * r1 and monotonic mints);
+    ///      require(total <= type(uint128).max) is retained as a defensive sanity guard for total * total squaring;
+    ///      quotient bound: with scale 1e15, max quotient is bounded by (2^112 - 1)^2 * 1e15 / 1000^2 < 2^224 * 10^9 < 2^254 < 2^256 - 1,
+    ///      guaranteeing Math.mulDiv quotient never overflows uint256 under any contract-reachable reserves and minimum supply.
     function invariant_KPerSharePreservedOrGrown() public {
         (uint112 r0, uint112 r1,) = pair.getReserves();
         uint256 total = pair.totalSupply();
         require(total > 0, "Total supply must be positive");
+        // Test-domain invariant guard: ensures total * total fits in uint256 for test calculation
+        require(total <= type(uint128).max, "Total supply exceeds test-domain bound for total^2");
 
-        uint256 currentKPerShare = (uint256(r0) * 1e18 / total) * (uint256(r1) * 1e18 / total);
-        assertGe(currentKPerShare, lastKPerShare, "K per share unit must be monotonically non-decreasing");
+        uint256 currentKPerShare = Math.mulDiv(uint256(r0) * uint256(r1), 1e15, total * total);
+        assertGe(
+            currentKPerShare, lastKPerShare, "Reserve product per supply squared must be monotonically non-decreasing"
+        );
         lastKPerShare = currentKPerShare;
     }
 

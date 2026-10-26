@@ -49,7 +49,7 @@ graph TD
 * **Evidence & Invariants:**
   * Exploit test: [`test/dex/AviorAMMPairExploit.t.sol`](./test/dex/AviorAMMPairExploit.t.sol)
   * Regression test: [`test/regressions/AviorAMMPairRegression.t.sol`](./test/regressions/AviorAMMPairRegression.t.sol)
-  * Stateful invariant test: [`test/invariants/AviorAMMPairInvariant.t.sol`](./test/invariants/AviorAMMPairInvariant.t.sol) (50,000 handler calls across 11 action types).
+  * Stateful invariant test: [`test/invariants/AviorAMMPairInvariant.t.sol`](./test/invariants/AviorAMMPairInvariant.t.sol) (50,000 handler calls across 12 action types).
 * **Research Documentation:** [`docs/AMM_SECURITY_REVIEW.md`](./docs/AMM_SECURITY_REVIEW.md) and [`reports/REPORT_DEX_01_AMM_REENTRANCY_RESERVE_DESYNC.md`](./reports/REPORT_DEX_01_AMM_REENTRANCY_RESERVE_DESYNC.md) (CVSS 9.8 Critical).
 
 ---
@@ -147,8 +147,8 @@ Every test result documented below is factual and executed against local Foundry
 ```text
 $ forge test -vvv
 
-Ran 31 test suites: 91 tests passed, 0 failed, 0 skipped (91 total tests)
-- AdversarialSecurityAuditTest: 14 passed (Timestamp rollover across 2^32-1, rollover with interim reserve changes, zero elapsed time, fail-closed and parameterized staleness checks, separated consultUnchecked, full uint256 observation age across 2^32 seconds, sustained manipulation holding costs, router perimeter zero-address validation, fee-on-transfer socialization, negative rebase K-checks, router FoT swap rejection, K per share invariant preservation under liquidity removal and collapse on exploit drain)
+Ran 31 test suites: 92 tests passed, 0 failed, 0 skipped (92 total tests)
+- AdversarialSecurityAuditTest: 15 passed (Timestamp rollover across 2^32-1, rollover with interim reserve changes, zero elapsed time, fail-closed and parameterized staleness checks, separated consultUnchecked, full uint256 observation age across 2^32 seconds, sustained manipulation holding costs, router perimeter zero-address validation, fee-on-transfer socialization, negative rebase K-checks, router FoT swap rejection, K per share invariant preservation under liquidity removal and collapse on exploit drain, deterministic counterexample to two-floor metric)
 - AviorAMMPairExploitTest: 2 passed (Reentrant sync drain & Genesis share inflation)
 - AviorAMMPairRegressionTest: 5 passed (Reentrancy mutex, fee enforcement, K-invariant fuzzing)
 - AviorAMMPairInvariantTest: 1 passed (1,000 runs, 50,000 calls across K per share growth, reserve backing, dead address lock, zero-shares burn, cumulative price modular progress, bounded timestamp consistency with active warpTime)
