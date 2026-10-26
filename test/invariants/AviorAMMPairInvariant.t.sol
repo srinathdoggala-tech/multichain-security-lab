@@ -366,12 +366,14 @@ contract AviorAMMPairInvariantTest is Test {
     ///      - Direct donations / skim: Physical donations do not change stored reserves until sync(); skim() leaves
     ///        stored reserves unaffected; sync() increases stored reserves to balances (>= r_i), ensuring Q_s' >= Q_s.
     ///      Scope & Assumptions: Standard ERC-20 conservation (no fee-on-transfer, rebasing, or external balance reduction);
-    ///      solvency (T >= MINIMUM_LIQUIDITY = 1000 permanently locked at DEAD_ADDRESS); arithmetic computed via Math.mulDiv
+    ///      solvency (T >= MINIMUM_LIQUIDITY = 1000 permanently locked at DEAD_ADDRESS); total supply bound (T <= 2^128 - 1,
+    ///      ensuring checked total * total fits in uint256 without overflow); arithmetic computed via Math.mulDiv
     ///      with 512-bit intermediate product to eliminate intermediate truncation or overflow.
     function invariant_KPerSharePreservedOrGrown() public {
         (uint112 r0, uint112 r1,) = pair.getReserves();
         uint256 total = pair.totalSupply();
         require(total > 0, "Total supply must be positive");
+        require(total <= type(uint128).max, "Total supply exceeds safe non-overflow bound for total^2");
 
         uint256 currentKPerShare = Math.mulDiv(uint256(r0) * uint256(r1), 1e18, total * total);
         assertGe(

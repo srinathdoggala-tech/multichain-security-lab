@@ -49,16 +49,17 @@ The `AMMHandler` models an adversarial multi-actor environment with 3 distinct u
   - **Burns (`pair.burn`):** Redeemed asset amounts are floored: $a_i = \lfloor \mathcal{S} r_i / \mathcal{T} \rfloor \le \mathcal{S} r_i / \mathcal{T}$. Remaining reserves are $r_i' = r_i - a_i \ge r_i(1 - \mathcal{S}/\mathcal{T})$. Since remaining supply is $\mathcal{T}' = \mathcal{T}(1 - \mathcal{S}/\mathcal{T})$, asset density $\frac{r_i'}{\mathcal{T}'} \ge \frac{r_i}{\mathcal{T}}$ is non-decreasing for both assets, ensuring $Q_s' \ge Q_s$.
   - **Donations, Skim & Sync:** Direct token donations increase physical balances without altering stored reserves ($Q_s' = Q_s$); `skim()` removes excess balance without modifying stored reserves ($Q_s' = Q_s$); `sync()` updates stored reserves to actual balances ($\ge r_i$), ensuring $Q_s' \ge Q_s$.
 - **Integer Widths & Arithmetic Precision:**
-  - $r_0, r_1 \le \text{type}(uint112).\text{max} < 2^{112} \implies r_0 r_1 < 2^{224}$.
-  - $\mathcal{T} \le 2^{112} \implies \mathcal{T}^2 \le 2^{224} < 2^{256}$ (cannot overflow `uint256`).
-  - Intermediate product $r_0 r_1 \cdot 10^{18} < 2^{284} \ll 2^{512}$, computed using OpenZeppelin `Math.mulDiv` (512-bit full-precision Chinese Remainder Theorem multiplication and division) to eliminate any intermediate truncation or overflow.
+  - Reserves $r_0, r_1 \le \text{type}(uint112).\text{max} < 2^{112} \implies r_0 r_1 < 2^{224}$, which fits safely within `uint256`.
+  - **Total Supply Bound & Denominator Squaring:** Reserve limits ($r_i < 2^{112}$) do not automatically bound $\mathcal{T} \le 2^{112}$ if the pool had extreme genesis imbalance (e.g., initializing with 1,000 wei of token 0 and $2^{112}-1$ of token 1 allows subsequent single-sided deposits to push $\mathcal{T} \ge 2^{128}$). Consequently, avoiding checked overflow in $\mathcal{T}^2 = \text{total} \times \text{total}$ explicitly relies on the operational bound $\mathcal{T} \le 2^{128}-1 \approx 3.4 \times 10^{38}$ wei (formally guarded in the invariant by `require(total <= type(uint128).max)`). In the actual harness, $\mathcal{T} \approx 100 \text{ ether} = 10^{20} \ll 2^{128}$, ensuring $\mathcal{T}^2 \approx 10^{40}$ fits comfortably in `uint256`.
+  - Intermediate product $r_0 r_1 \cdot 10^{18} < 2^{284} \ll 2^{512}$, computed using OpenZeppelin `Math.mulDiv` (512-bit full-precision Chinese Remainder Theorem multiplication and division) to eliminate intermediate truncation or overflow.
   - Solvency guarantee: $\mathcal{T} \ge \text{MINIMUM\_LIQUIDITY} = 1000 \implies \mathcal{T}^2 \ge 10^6 > 0$, preventing division by zero.
 - **Stated Assumptions & Operational Scope:**
   - Token balances conform to standard ERC-20 conservation without external decreases (non-rebasing, non-fee-on-transfer for stored pool balances).
   - Total supply never drops to zero ($\mathcal{T} \ge \text{MINIMUM\_LIQUIDITY} = 1000$ wei permanently locked at `DEAD_ADDRESS`).
+  - Total supply remains within the squaring domain ($\mathcal{T} \le 2^{128}-1$).
 - **Relevant Handler Actions:** `swap0`, `swap1`, `addLiquidity`, `removeLiquidity`, `donate`, `skim`, `sync`, `swapViaRouter`.
 - **How Tested:** Checked via `invariant_KPerSharePreservedOrGrown()` in `test/invariants/AviorAMMPairInvariant.t.sol` and regression counterexample in `test_Adversarial_ProductOfFlooredRatiosDecreasesOnSwapCounterexample`.
-- **Empirical Test Evidence:** Supported by 50,000 handler calls across 1,000 runs (depth 50) with zero violations observed in the explored parameter space.
+- **Empirical Test Evidence & Scope:** Supported by 50,000 handler calls across 1,000 runs (depth 50) with zero violations observed. This campaign represents strong empirical evidence over the harness parameter space; it is not an exhaustive formal proof across all possible sequences or adversarial initialization states.
 
 ---
 
