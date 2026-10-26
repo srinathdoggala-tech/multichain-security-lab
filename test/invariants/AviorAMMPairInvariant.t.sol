@@ -163,7 +163,7 @@ contract AMMHandler is Test {
         uint256 sharesToBurn = bound(shareSeed, 1, userShares);
         (uint112 preR0, uint112 preR1,) = pair.getReserves();
         uint256 preTotal = pair.totalSupply();
-        uint256 preKPerShare = Math.mulDiv(uint256(preR0) * uint256(preR1), 1e18, preTotal * preTotal);
+        uint256 preKPerShare = Math.mulDiv(uint256(preR0) * uint256(preR1), 1e15, preTotal * preTotal);
 
         vm.startPrank(actor);
         pair.transfer(address(pair), sharesToBurn);
@@ -172,7 +172,7 @@ contract AMMHandler is Test {
 
         (uint112 postR0, uint112 postR1,) = pair.getReserves();
         uint256 postTotal = pair.totalSupply();
-        uint256 postKPerShare = Math.mulDiv(uint256(postR0) * uint256(postR1), 1e18, postTotal * postTotal);
+        uint256 postKPerShare = Math.mulDiv(uint256(postR0) * uint256(postR1), 1e15, postTotal * postTotal);
         require(postKPerShare >= preKPerShare, "Burn must preserve or grow K per supply squared");
 
         lastPairActionTimestamp = block.timestamp;
@@ -348,14 +348,14 @@ contract AviorAMMPairInvariantTest is Test {
 
         (uint112 r0, uint112 r1,) = pair.getReserves();
         uint256 total = pair.totalSupply();
-        lastKPerShare = Math.mulDiv(uint256(r0) * uint256(r1), 1e18, total * total);
+        lastKPerShare = Math.mulDiv(uint256(r0) * uint256(r1), 1e15, total * total);
     }
 
     uint256 public lastKPerShare;
 
-    /// @notice Invariant 1: Constant-product reserve density per supply squared (floor(r0 * r1 * 1e18 / total^2)) is monotonically non-decreasing
+    /// @notice Invariant 1: Constant-product reserve density per supply squared (floor(r0 * r1 * 1e15 / total^2)) is monotonically non-decreasing
     /// @dev Raw K = r0 * r1 legitimately decreases on removeLiquidity as assets exit the pool.
-    ///      However, the single-floored scaled reserve product per supply squared Q_s = floor((r0 * r1 * 1e18) / total^2)
+    ///      However, the single-floored scaled reserve product per supply squared Q_s = floor((r0 * r1 * 1e15) / total^2)
     ///      is mathematically non-decreasing across all supported state transitions:
     ///      - Swaps: Total LP shares remain constant (T' = T); the 0.3% retained fee ensures post-swap
     ///        r0' * r1' >= r0 * r1, guaranteeing Q_s' >= Q_s without floor-boundary collapse.
@@ -370,7 +370,8 @@ contract AviorAMMPairInvariantTest is Test {
     ///      Scope & Assumptions: Standard ERC-20 conservation (no fee-on-transfer, rebasing, or external balance reduction);
     ///      solvency (T >= MINIMUM_LIQUIDITY = 1000 permanently locked at DEAD_ADDRESS); test-domain total supply bound
     ///      (T <= 2^128 - 1, guarding test calculation total * total from overflow, not an on-chain pair contract cap);
-    ///      arithmetic computed via Math.mulDiv with 512-bit intermediate product to eliminate intermediate truncation or overflow.
+    ///      quotient bound: with scale 1e15, max quotient is bounded by (2^112 - 1)^2 * 1e15 / 1000^2 < 2^224 * 10^9 < 2^254 < 2^256 - 1,
+    ///      guaranteeing Math.mulDiv quotient never overflows uint256 under any contract-reachable reserves and minimum supply.
     function invariant_KPerSharePreservedOrGrown() public {
         (uint112 r0, uint112 r1,) = pair.getReserves();
         uint256 total = pair.totalSupply();
@@ -378,7 +379,7 @@ contract AviorAMMPairInvariantTest is Test {
         // Test-domain invariant guard: ensures total * total fits in uint256 for test calculation
         require(total <= type(uint128).max, "Total supply exceeds test-domain bound for total^2");
 
-        uint256 currentKPerShare = Math.mulDiv(uint256(r0) * uint256(r1), 1e18, total * total);
+        uint256 currentKPerShare = Math.mulDiv(uint256(r0) * uint256(r1), 1e15, total * total);
         assertGe(
             currentKPerShare, lastKPerShare, "Reserve product per supply squared must be monotonically non-decreasing"
         );

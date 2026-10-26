@@ -642,13 +642,13 @@ contract AdversarialSecurityAuditTest is Test {
     // 13. K PER SHARE INVARIANT VALIDATION & EXPLOIT SENSITIVITY TEST
     // =========================================================================
 
-    /// @notice Verifies that K per share (floor(r0 * r1 * 1e18 / total^2)) is preserved on legitimate
+    /// @notice Verifies that K per share (floor(r0 * r1 * 1e15 / total^2)) is preserved on legitimate
     ///         liquidity removal, but collapses to near-zero when an exploit drain occurs.
     function test_Adversarial_KPerShareInvariantValidUnderLiquidityRemovalAndFailsOnExploit() public {
         // 1. On secured pair: removeLiquidity drops raw K, but preserves K per share
         (uint112 r0Pre, uint112 r1Pre,) = pair.getReserves();
         uint256 totalPre = pair.totalSupply();
-        uint256 kPerSharePre = Math.mulDiv(uint256(r0Pre) * uint256(r1Pre), 1e18, totalPre * totalPre);
+        uint256 kPerSharePre = Math.mulDiv(uint256(r0Pre) * uint256(r1Pre), 1e15, totalPre * totalPre);
 
         // Add liquidity for Alice
         token0.mint(alice, 100 ether);
@@ -670,7 +670,7 @@ contract AdversarialSecurityAuditTest is Test {
 
         (uint112 r0Post, uint112 r1Post,) = pair.getReserves();
         uint256 totalPost = pair.totalSupply();
-        uint256 kPerSharePost = Math.mulDiv(uint256(r0Post) * uint256(r1Post), 1e18, totalPost * totalPost);
+        uint256 kPerSharePost = Math.mulDiv(uint256(r0Post) * uint256(r1Post), 1e15, totalPost * totalPost);
         uint256 rawKPost = uint256(r0Post) * uint256(r1Post);
 
         // Raw K legitimately drops after burn:
@@ -686,7 +686,7 @@ contract AdversarialSecurityAuditTest is Test {
 
         uint256 vulnTotal = vulnPair.totalSupply();
         (uint112 v0, uint112 v1,) = vulnPair.getReserves();
-        uint256 vulnKPerSharePre = Math.mulDiv(uint256(v0) * uint256(v1), 1e18, vulnTotal * vulnTotal);
+        uint256 vulnKPerSharePre = Math.mulDiv(uint256(v0) * uint256(v1), 1e15, vulnTotal * vulnTotal);
         assertGt(vulnKPerSharePre, 0);
 
         // Simulate reserve drain on vulnerable pair
@@ -695,7 +695,7 @@ contract AdversarialSecurityAuditTest is Test {
         vulnPair.sync();
 
         (uint112 v0Post, uint112 v1Post,) = vulnPair.getReserves();
-        uint256 vulnKPerSharePost = Math.mulDiv(uint256(v0Post) * uint256(v1Post), 1e18, vulnTotal * vulnTotal);
+        uint256 vulnKPerSharePost = Math.mulDiv(uint256(v0Post) * uint256(v1Post), 1e15, vulnTotal * vulnTotal);
 
         // K per share collapses by 99% upon exploit drain!
         assertLt(vulnKPerSharePost, vulnKPerSharePre / 50, "K per share collapses on exploit drain");
@@ -706,7 +706,7 @@ contract AdversarialSecurityAuditTest is Test {
     ///         strictly DECREASES across a legitimate, fee-paying swap due to asymmetric floor truncation,
     ///         even while raw K strictly grows (postK > preK).
     ///         Proves that the single-floored scaled reserve-product-per-supply-squared metric:
-    ///         Q_s = floor((r0 * r1 * 1e18) / T^2)
+    ///         Q_s = floor((r0 * r1 * 1e15) / T^2)
     ///         resolves the flaw and remains strictly non-decreasing across the same transition.
     function test_Adversarial_ProductOfFlooredRatiosDecreasesOnSwapCounterexample() public {
         // Pool is initialized with 1,000 ether of token0 and token1, T = 1,000 ether
@@ -721,9 +721,9 @@ contract AdversarialSecurityAuditTest is Test {
         uint256 twoFloorPre = (uint256(r0Pre) * 1e18 / total) * (uint256(r1Pre) * 1e18 / total);
         assertEq(twoFloorPre, 1e36);
 
-        // 2. Single-floored scaled metric: floor((r0 * r1 * 1e18) / total^2)
-        uint256 singleFloorPre = Math.mulDiv(uint256(r0Pre) * uint256(r1Pre), 1e18, total * total);
-        assertEq(singleFloorPre, 1e18);
+        // 2. Single-floored scaled metric: floor((r0 * r1 * 1e15) / total^2)
+        uint256 singleFloorPre = Math.mulDiv(uint256(r0Pre) * uint256(r1Pre), 1e15, total * total);
+        assertEq(singleFloorPre, 1e15);
 
         uint256 rawKPre = uint256(r0Pre) * uint256(r1Pre);
 
@@ -759,12 +759,12 @@ contract AdversarialSecurityAuditTest is Test {
         );
 
         // Evaluate single-floored scaled metric post-swap:
-        // floor(((10^42 + 10^21 - 2) * 1e18) / 10^42) = 1e18 + floor((10^39 - 2e18) / 10^42) = 1e18
-        uint256 singleFloorPost = Math.mulDiv(uint256(r0Post) * uint256(r1Post), 1e18, totalPost * totalPost);
+        // floor(((10^42 + 10^21 - 2) * 1e15) / 10^42) = 1e15 + floor((10^36 - 2e15) / 10^42) = 1e15
+        uint256 singleFloorPost = Math.mulDiv(uint256(r0Post) * uint256(r1Post), 1e15, totalPost * totalPost);
         assertGe(
             singleFloorPost, singleFloorPre, "Single-floored metric is preserved/non-decreasing across minimal swap"
         );
-        assertEq(singleFloorPost, 1e18);
+        assertEq(singleFloorPost, 1e15);
 
         // Further proof: on a normal swap (e.g. 1 ether), the single-floored metric strictly grows
         token0.mint(address(pair), 1 ether);
@@ -775,7 +775,7 @@ contract AdversarialSecurityAuditTest is Test {
         pair.swap(0, amount1Out, alice, "");
 
         (uint112 r0Final, uint112 r1Final,) = pair.getReserves();
-        uint256 singleFloorFinal = Math.mulDiv(uint256(r0Final) * uint256(r1Final), 1e18, totalPost * totalPost);
+        uint256 singleFloorFinal = Math.mulDiv(uint256(r0Final) * uint256(r1Final), 1e15, totalPost * totalPost);
         assertGt(singleFloorFinal, singleFloorPost, "Single-floored metric strictly grows on normal fee-paying swap");
     }
 }
