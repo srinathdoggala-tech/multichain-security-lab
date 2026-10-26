@@ -33,21 +33,31 @@ The `AMMHandler` models an adversarial multi-actor environment with 3 distinct u
 
 ## 3. Stated System Properties & Invariant Specifications
 
-### Invariant 1: Constant-Product $K$ Per Share Monotonicity (`invariant_KPerSharePreservedOrGrown`)
+### Invariant 1: Constant-Product Reserve Density Per Supply Squared Monotonicity (`invariant_KPerSharePreservedOrGrown`)
 - **Mathematical Intent:**
-  $$\forall t_2 \ge t_1, \quad K_{\text{per\_share}}(t_2) \ge K_{\text{per\_share}}(t_1)$$
+  $$\forall t_2 \ge t_1, \quad Q_s(t_2) \ge Q_s(t_1)$$
   where
-  $$K_{\text{per\_share}} = \left\lfloor\frac{r_0 \cdot 10^{18}}{\mathcal{T}}\right\rfloor \times \left\lfloor\frac{r_1 \cdot 10^{18}}{\mathcal{T}}\right\rfloor$$
-- **Analytical Property Rationale & EVM Integer Truncation:**
-  - **Swaps:** Total LP shares $\mathcal{T}$ remain constant; the 0.3% retained fee ensures post-swap $r_0' \cdot r_1' \ge r_0 \cdot r_1$, strictly growing $K_{\text{per\_share}}$.
-  - **Mints (`pair.mint`):** Minted shares are floored: $\mathcal{L} = \min\left(\lfloor a_0 \mathcal{T} / r_0 \rfloor, \lfloor a_1 \mathcal{T} / r_1 \rfloor\right) \le a_0 \mathcal{T} / r_0$. Flooring new shares down reduces the new total supply $\mathcal{T}' = \mathcal{T} + \mathcal{L}$, ensuring $\frac{r_i'}{\mathcal{T}'} \ge \frac{r_i}{\mathcal{T}}$, rounding in favor of the pool.
-  - **Burns (`pair.burn`):** Redeemed asset amounts are floored: $a_i = \lfloor \mathcal{S} r_i / \mathcal{T} \rfloor \le \mathcal{S} r_i / \mathcal{T}$. Remaining reserves are $r_i' = r_i - a_i \ge r_i(1 - \mathcal{S}/\mathcal{T})$. Since remaining supply is $\mathcal{T}' = \mathcal{T}(1 - \mathcal{S}/\mathcal{T})$, asset density $\frac{r_i'}{\mathcal{T}'} \ge \frac{r_i}{\mathcal{T}}$ is non-decreasing. By floor monotonicity ($x \ge y \implies \lfloor x \rfloor \ge \lfloor y \rfloor$), $K_{\text{per\_share}}$ is non-decreasing across all burns under standard token accounting.
-  - **Donations & Skim:** Token donations increase physical balances; `skim()` removes excess balance without modifying stored reserves; `sync()` updates stored reserves to balances ($\ge r_i$), preserving or growing reserve density.
+  $$Q_s = \left\lfloor\frac{r_0 \cdot r_1 \cdot 10^{18}}{\mathcal{T}^2}\right\rfloor$$
+- **Correction from Prior Two-Floor Formulation:**
+  - **Defect in Separately Floored Ratios:** The prior metric computed the product of two independently floored quotients:
+    $$K_s = \left\lfloor\frac{r_0 \cdot 10^{18}}{\mathcal{T}}\right\rfloor \times \left\lfloor\frac{r_1 \cdot 10^{18}}{\mathcal{T}}\right\rfloor$$
+    While raw constant product $r_0 r_1$ is non-decreasing across fee-paying swaps, the product of two separately floored quotients can strictly decrease across legitimate swaps. When token 1 is extracted ($r_1' = r_1 - 1$ wei), if $\frac{r_1 \cdot 10^{18}}{\mathcal{T}}$ crosses an integer boundary, its floor drops by 1 integer unit. Meanwhile, the deposit of token 0 ($r_0' = r_0 + 2$ wei) produces a fractional increase $\frac{2 \cdot 10^{18}}{\mathcal{T}} < 1$ that is truncated to zero by the independent floor. Consequently, $\lfloor x' \rfloor \lfloor y' \rfloor = \lfloor x \rfloor (\lfloor y \rfloor - 1) < \lfloor x \rfloor \lfloor y \rfloor$, causing the integer metric to decrease by $\lfloor x \rfloor$ (e.g., $10^{18}$) despite raw $K$ strictly growing. This is deterministically proven in `test_Adversarial_ProductOfFlooredRatiosDecreasesOnSwapCounterexample`.
+  - **Single-Floored Resolution ($Q_s$):** Defining $Q = \frac{r_0 r_1}{\mathcal{T}^2}$ as a single rational quantity scaled by $S = 10^{18}$ and taking a single floor at the end ensures that any increase in real $Q$ preserves or increases $Q_s$, because the floor function $f(u) = \lfloor u \rfloor$ is monotonic ($u \ge v \implies \lfloor u \rfloor \ge \lfloor v \rfloor$).
+- **Analytical Property Rationale Across State Transitions:**
+  - **Swaps:** Total LP shares remain constant ($\mathcal{T}' = \mathcal{T}$); the 0.3% retained fee guarantees $r_0' r_1' \ge r_0 r_1$, so $\frac{r_0' r_1' \cdot 10^{18}}{\mathcal{T}'^2} \ge \frac{r_0 r_1 \cdot 10^{18}}{\mathcal{T}^2}$. By monotonicity of the single floor function, $Q_s' \ge Q_s$.
+  - **Mints (`pair.mint`):** Minted shares are floored: $\mathcal{L} = \min\left(\lfloor a_0 \mathcal{T} / r_0 \rfloor, \lfloor a_1 \mathcal{T} / r_1 \rfloor\right) \le a_i \mathcal{T} / r_i$. Flooring new shares down ensures $\frac{r_0'}{\mathcal{T}'} \ge \frac{r_0}{\mathcal{T}}$ and $\frac{r_1'}{\mathcal{T}'} \ge \frac{r_1}{\mathcal{T}}$. Since both asset-to-share ratios are non-decreasing, their product $\frac{r_0' r_1'}{\mathcal{T}'^2} \ge \frac{r_0 r_1}{\mathcal{T}^2}$ is non-decreasing, ensuring $Q_s' \ge Q_s$.
+  - **Burns (`pair.burn`):** Redeemed asset amounts are floored: $a_i = \lfloor \mathcal{S} r_i / \mathcal{T} \rfloor \le \mathcal{S} r_i / \mathcal{T}$. Remaining reserves are $r_i' = r_i - a_i \ge r_i(1 - \mathcal{S}/\mathcal{T})$. Since remaining supply is $\mathcal{T}' = \mathcal{T}(1 - \mathcal{S}/\mathcal{T})$, asset density $\frac{r_i'}{\mathcal{T}'} \ge \frac{r_i}{\mathcal{T}}$ is non-decreasing for both assets, ensuring $Q_s' \ge Q_s$.
+  - **Donations, Skim & Sync:** Direct token donations increase physical balances without altering stored reserves ($Q_s' = Q_s$); `skim()` removes excess balance without modifying stored reserves ($Q_s' = Q_s$); `sync()` updates stored reserves to actual balances ($\ge r_i$), ensuring $Q_s' \ge Q_s$.
+- **Integer Widths & Arithmetic Precision:**
+  - $r_0, r_1 \le \text{type}(uint112).\text{max} < 2^{112} \implies r_0 r_1 < 2^{224}$.
+  - $\mathcal{T} \le 2^{112} \implies \mathcal{T}^2 \le 2^{224} < 2^{256}$ (cannot overflow `uint256`).
+  - Intermediate product $r_0 r_1 \cdot 10^{18} < 2^{284} \ll 2^{512}$, computed using OpenZeppelin `Math.mulDiv` (512-bit full-precision Chinese Remainder Theorem multiplication and division) to eliminate any intermediate truncation or overflow.
+  - Solvency guarantee: $\mathcal{T} \ge \text{MINIMUM\_LIQUIDITY} = 1000 \implies \mathcal{T}^2 \ge 10^6 > 0$, preventing division by zero.
 - **Stated Assumptions & Operational Scope:**
   - Token balances conform to standard ERC-20 conservation without external decreases (non-rebasing, non-fee-on-transfer for stored pool balances).
   - Total supply never drops to zero ($\mathcal{T} \ge \text{MINIMUM\_LIQUIDITY} = 1000$ wei permanently locked at `DEAD_ADDRESS`).
 - **Relevant Handler Actions:** `swap0`, `swap1`, `addLiquidity`, `removeLiquidity`, `donate`, `skim`, `sync`, `swapViaRouter`.
-- **How Tested:** Checked via `invariant_KPerSharePreservedOrGrown()`.
+- **How Tested:** Checked via `invariant_KPerSharePreservedOrGrown()` in `test/invariants/AviorAMMPairInvariant.t.sol` and regression counterexample in `test_Adversarial_ProductOfFlooredRatiosDecreasesOnSwapCounterexample`.
 - **Empirical Test Evidence:** Supported by 50,000 handler calls across 1,000 runs (depth 50) with zero violations observed in the explored parameter space.
 
 ---

@@ -12,6 +12,7 @@ import "../mocks/FeeOnTransferToken.sol";
 import "../mocks/RebasingToken.sol";
 import "../mocks/MissingReturnToken.sol";
 import "../mocks/ReentrantHookToken.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title AdversarialSecurityAuditTest
 /// @notice Independent adversarial test suite evaluating AMM, Router, TWAP Oracle, and Token boundary conditions
@@ -641,13 +642,13 @@ contract AdversarialSecurityAuditTest is Test {
     // 13. K PER SHARE INVARIANT VALIDATION & EXPLOIT SENSITIVITY TEST
     // =========================================================================
 
-    /// @notice Verifies that K per share ((r0 * 1e18 / total) * (r1 * 1e18 / total)) is preserved on legitimate
+    /// @notice Verifies that K per share (floor(r0 * r1 * 1e18 / total^2)) is preserved on legitimate
     ///         liquidity removal, but collapses to near-zero when an exploit drain occurs.
     function test_Adversarial_KPerShareInvariantValidUnderLiquidityRemovalAndFailsOnExploit() public {
         // 1. On secured pair: removeLiquidity drops raw K, but preserves K per share
         (uint112 r0Pre, uint112 r1Pre,) = pair.getReserves();
         uint256 totalPre = pair.totalSupply();
-        uint256 kPerSharePre = (uint256(r0Pre) * 1e18 / totalPre) * (uint256(r1Pre) * 1e18 / totalPre);
+        uint256 kPerSharePre = Math.mulDiv(uint256(r0Pre) * uint256(r1Pre), 1e18, totalPre * totalPre);
 
         // Add liquidity for Alice
         token0.mint(alice, 100 ether);
@@ -669,7 +670,7 @@ contract AdversarialSecurityAuditTest is Test {
 
         (uint112 r0Post, uint112 r1Post,) = pair.getReserves();
         uint256 totalPost = pair.totalSupply();
-        uint256 kPerSharePost = (uint256(r0Post) * 1e18 / totalPost) * (uint256(r1Post) * 1e18 / totalPost);
+        uint256 kPerSharePost = Math.mulDiv(uint256(r0Post) * uint256(r1Post), 1e18, totalPost * totalPost);
         uint256 rawKPost = uint256(r0Post) * uint256(r1Post);
 
         // Raw K legitimately drops after burn:
@@ -685,7 +686,7 @@ contract AdversarialSecurityAuditTest is Test {
 
         uint256 vulnTotal = vulnPair.totalSupply();
         (uint112 v0, uint112 v1,) = vulnPair.getReserves();
-        uint256 vulnKPerSharePre = (uint256(v0) * 1e18 / vulnTotal) * (uint256(v1) * 1e18 / vulnTotal);
+        uint256 vulnKPerSharePre = Math.mulDiv(uint256(v0) * uint256(v1), 1e18, vulnTotal * vulnTotal);
         assertGt(vulnKPerSharePre, 0);
 
         // Simulate reserve drain on vulnerable pair
@@ -694,9 +695,87 @@ contract AdversarialSecurityAuditTest is Test {
         vulnPair.sync();
 
         (uint112 v0Post, uint112 v1Post,) = vulnPair.getReserves();
-        uint256 vulnKPerSharePost = (uint256(v0Post) * 1e18 / vulnTotal) * (uint256(v1Post) * 1e18 / vulnTotal);
+        uint256 vulnKPerSharePost = Math.mulDiv(uint256(v0Post) * uint256(v1Post), 1e18, vulnTotal * vulnTotal);
 
         // K per share collapses by 99% upon exploit drain!
         assertLt(vulnKPerSharePost, vulnKPerSharePre / 50, "K per share collapses on exploit drain");
+    }
+
+    /// @notice Proves that the naive product of separately floored reserve-per-share ratios:
+    ///         K_s = floor(r0 * 1e18 / T) * floor(r1 * 1e18 / T)
+    ///         strictly DECREASES across a legitimate, fee-paying swap due to asymmetric floor truncation,
+    ///         even while raw K strictly grows (postK > preK).
+    ///         Proves that the single-floored scaled reserve-product-per-supply-squared metric:
+    ///         Q_s = floor((r0 * r1 * 1e18) / T^2)
+    ///         resolves the flaw and remains strictly non-decreasing across the same transition.
+    function test_Adversarial_ProductOfFlooredRatiosDecreasesOnSwapCounterexample() public {
+        // Pool is initialized with 1,000 ether of token0 and token1, T = 1,000 ether
+        (uint112 r0Pre, uint112 r1Pre,) = pair.getReserves();
+        uint256 total = pair.totalSupply();
+        assertEq(r0Pre, 1_000 ether);
+        assertEq(r1Pre, 1_000 ether);
+        assertEq(total, 1_000 ether);
+
+        // Pre-swap evaluations:
+        // 1. Two-floor metric: floor(r0 * 1e18 / T) * floor(r1 * 1e18 / T)
+        uint256 twoFloorPre = (uint256(r0Pre) * 1e18 / total) * (uint256(r1Pre) * 1e18 / total);
+        assertEq(twoFloorPre, 1e36);
+
+        // 2. Single-floored scaled metric: floor((r0 * r1 * 1e18) / total^2)
+        uint256 singleFloorPre = Math.mulDiv(uint256(r0Pre) * uint256(r1Pre), 1e18, total * total);
+        assertEq(singleFloorPre, 1e18);
+
+        uint256 rawKPre = uint256(r0Pre) * uint256(r1Pre);
+
+        // Execute a minimal valid swap:
+        // Deposit 2 wei of token0 and request 1 wei of token1 out.
+        // For r0 = 1,000 ether, r1 = 1,000 ether:
+        // balance0Adjusted = (1,000 ether + 2) * 1000 - 2 * 3 = 1000 * 1,000 ether + 1994
+        // balance1Adjusted = (1,000 ether - 1) * 1000 = 1000 * 1,000 ether - 1000
+        // product >= 1000^2 * 1,000 ether * 1,000 ether (passes K-check)
+        token0.mint(address(pair), 2);
+        pair.swap(0, 1, alice, "");
+
+        (uint112 r0Post, uint112 r1Post,) = pair.getReserves();
+        uint256 totalPost = pair.totalSupply();
+        assertEq(totalPost, total, "Total supply must be constant across swap");
+        assertEq(r0Post, 1_000 ether + 2);
+        assertEq(r1Post, 1_000 ether - 1);
+
+        uint256 rawKPost = uint256(r0Post) * uint256(r1Post);
+        // Raw K strictly grew: (1000e18 + 2)(1000e18 - 1) = 10^42 + 10^21 - 2 > 10^42
+        assertGt(rawKPost, rawKPre, "Raw K must strictly grow on fee-paying swap");
+
+        // Evaluate two-floor metric post-swap:
+        // floor((1000e18 + 2) * 1e18 / 1000e18) = 1e18
+        // floor((1000e18 - 1) * 1e18 / 1000e18) = 1e18 - 1
+        // product = 1e18 * (1e18 - 1) = 1e36 - 1e18
+        uint256 twoFloorPost = (uint256(r0Post) * 1e18 / totalPost) * (uint256(r1Post) * 1e18 / totalPost);
+        assertEq(twoFloorPost, 1e36 - 1e18);
+
+        // COUNTEREXAMPLE PROOF: The two-floor metric strictly decreased by 1e18!
+        assertLt(
+            twoFloorPost, twoFloorPre, "Two-floor metric improperly decreases across swap due to boundary truncation"
+        );
+
+        // Evaluate single-floored scaled metric post-swap:
+        // floor(((10^42 + 10^21 - 2) * 1e18) / 10^42) = 1e18 + floor((10^39 - 2e18) / 10^42) = 1e18
+        uint256 singleFloorPost = Math.mulDiv(uint256(r0Post) * uint256(r1Post), 1e18, totalPost * totalPost);
+        assertGe(
+            singleFloorPost, singleFloorPre, "Single-floored metric is preserved/non-decreasing across minimal swap"
+        );
+        assertEq(singleFloorPost, 1e18);
+
+        // Further proof: on a normal swap (e.g. 1 ether), the single-floored metric strictly grows
+        token0.mint(address(pair), 1 ether);
+        uint256 amountInWithFee = 1 ether * 997;
+        uint256 num = amountInWithFee * uint256(r1Post);
+        uint256 den = (uint256(r0Post) * 1000) + amountInWithFee;
+        uint256 amount1Out = num / den;
+        pair.swap(0, amount1Out, alice, "");
+
+        (uint112 r0Final, uint112 r1Final,) = pair.getReserves();
+        uint256 singleFloorFinal = Math.mulDiv(uint256(r0Final) * uint256(r1Final), 1e18, totalPost * totalPost);
+        assertGt(singleFloorFinal, singleFloorPost, "Single-floored metric strictly grows on normal fee-paying swap");
     }
 }

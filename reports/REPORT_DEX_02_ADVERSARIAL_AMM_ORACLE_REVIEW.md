@@ -12,7 +12,7 @@
 - **Inherited Material:** Base EVM educational challenge labs (reentrancy, oracle attack, signature replay) originated from [`void-node/My-first-smart-contract-audit-lab`](https://github.com/void-node/My-first-smart-contract-audit-lab).
 - **Adapted Material:** The core constant-product AMM pair ([`src/dex/AviorAMMPairSecured.sol`](../src/dex/AviorAMMPairSecured.sol)), slippage router ([`src/dex/AviorRouter.sol`](../src/dex/AviorRouter.sol)), and TWAP oracle ([`src/dex/AviorTWAPOracle.sol`](../src/dex/AviorTWAPOracle.sol)) adapt canonical Uniswap v2 mechanisms to Solidity `0.8.28`, replacing legacy assembly/Solidity 0.6 constructs with OpenZeppelin `ReentrancyGuard`, custom errors, and modular math libraries.
 - **Independently Authored Security Work:**
-  1. Adversarial test suite [`test/dex/AdversarialSecurityAudit.t.sol`](../test/dex/AdversarialSecurityAudit.t.sol) (14 tests covering boundary conditions, stale price exploitation, full-width `uint256` observation age calculation across $2^{32}$ seconds, FoT socialization, rebase freezes, rollover, and K per share invariant sensitivity).
+  1. Adversarial test suite [`test/dex/AdversarialSecurityAudit.t.sol`](../test/dex/AdversarialSecurityAudit.t.sol) (15 tests covering boundary conditions, stale price exploitation, full-width `uint256` observation age calculation across $2^{32}$ seconds, FoT socialization, rebase freezes, rollover, K per share invariant sensitivity, and mathematical counterexample to two-floor metric).
   2. Multi-tier staleness architecture in [`src/dex/AviorTWAPOracle.sol`](../src/dex/AviorTWAPOracle.sol):
      - Separate full-width `uint256 public lastObservationTimestamp` recording observation time on successful `update()`, completely eliminating observation age wrapping across $2^{32}$ seconds while keeping the pair's modular `uint32` cumulative price logic separate.
      - Fail-closed default `consult(address token, uint256 amountIn)` enforcing `2 * period` maximum staleness.
@@ -108,29 +108,37 @@ Consistent status definitions applied across the review:
   Furthermore, asserting unconditional monotonicity of the raw reserve product $K = r_0 \cdot r_1$ is mathematically invalid because legitimate proportional liquidity removal (`removeLiquidity`) burns LP shares and redeems underlying pool assets, decreasing raw $K$. In addition, cumulative price accumulators wrap modulo $2^{256}$.
 * **Remediation Implemented:**
   1. **Accounting-Aware Invariant (`invariant_KPerSharePreservedOrGrown`):**
-     Replaced unconditional raw $K$ monotonicity with reserve product per share unit:
-     $$K_{\text{per\_share}} = \left\lfloor\frac{r_0 \cdot 10^{18}}{\text{totalSupply}}\right\rfloor \times \left\lfloor\frac{r_1 \cdot 10^{18}}{\text{totalSupply}}\right\rfloor$$
-     * **Analytical Property Rationale & EVM Integer Truncation Dynamics:**
-       - **Swaps:** Total supply is constant; the 0.3% LP fee ensures post-swap raw $K \ge \text{preK}$, strictly increasing $K_{\text{per\_share}}$.
-       - **Mints (`pair.mint`):** Minted liquidity is floored: $L = \min\left(\lfloor a_0 T / r_0 \rfloor, \lfloor a_1 T / r_1 \rfloor\right) \le a_0 T / r_0$. Flooring newly issued shares reduces the new denominator $T' = T + L$, ensuring the post-mint ratio $\frac{r_i'}{T'} \ge \frac{r_i}{T}$ strictly favors existing pool reserves.
-       - **Burns (`pair.burn`):** Redeemed asset amounts are floored: $a_i = \lfloor S r_i / T \rfloor \le S r_i / T$. Remaining reserves $r_i' = r_i - a_i \ge r_i(1 - S/T)$. Because remaining shares are $T' = T(1 - S/T)$, the remaining asset density $\frac{r_i'}{T'} \ge \frac{r_i}{T}$ is analytically non-decreasing. By monotonicity of the integer floor function ($x \ge y \implies \lfloor x \rfloor \ge \lfloor y \rfloor$), $K_{\text{per\_share}}$ is non-decreasing across all burns under standard token accounting.
-       - **Donations & Skim:** Token donations increase physical balances; `skim()` removes excess balance without modifying stored reserves; `sync()` updates stored reserves to balances ($\ge r_i$), preserving or growing reserve density.
+     Replaced the defective two-floor ratio product with the mathematically rigorous single-floored reserve-product-per-supply-squared metric:
+     $$Q_s = \left\lfloor\frac{r_0 \cdot r_1 \cdot 10^{18}}{\text{totalSupply}^2}\right\rfloor$$
+     * **Mathematical Defect in Prior Separately Floored Ratios:**
+       The prior metric evaluated:
+       $$K_s = \left\lfloor\frac{r_0 \cdot 10^{18}}{T}\right\rfloor \times \left\lfloor\frac{r_1 \cdot 10^{18}}{T}\right\rfloor$$
+       While raw constant product $r_0 r_1$ is non-decreasing across fee-paying swaps, the product of two independently floored quotients can strictly decrease across legitimate swaps. For example, when token 1 is extracted ($r_1' = r_1 - 1$ wei), crossing an integer unit boundary causes its floor to drop by 1. Meanwhile, the deposit of token 0 ($r_0' = r_0 + 2$ wei) yields a fractional quotient increase $\frac{2 \cdot 10^{18}}{T} < 1$ that is truncated to 0 by the independent floor. Consequently, the product of the floors drops by $10^{18}$ despite raw $K$ strictly growing. This is deterministically proven in `test_Adversarial_ProductOfFlooredRatiosDecreasesOnSwapCounterexample`.
+     * **Single-Floored Resolution ($Q_s$):**
+       Evaluating $Q = \frac{r_0 r_1}{T^2}$ as a single rational quantity scaled by $S = 10^{18}$ and applying a single floor at the end ensures that any increase in real $Q$ directly guarantees $Q_s' \ge Q_s$ due to the monotonicity of the floor function ($u \ge v \implies \lfloor u \rfloor \ge \lfloor v \rfloor$).
+     * **Analytical Transition Rationale:**
+       - **Swaps:** Total supply is constant ($T' = T$); 0.3% LP fees ensure post-swap raw $K \ge \text{preK}$, guaranteeing $Q_s' \ge Q_s$ without floor-boundary collapse.
+       - **Mints (`pair.mint`):** Minted liquidity is floored: $L = \min\left(\lfloor a_0 T / r_0 \rfloor, \lfloor a_1 T / r_1 \rfloor\right) \le a_i T / r_i$. Flooring newly issued shares reduces denominator $T' = T + L$, ensuring post-mint ratios $\frac{r_0'}{T'} \ge \frac{r_0}{T}$ and $\frac{r_1'}{T'} \ge \frac{r_1}{T}$. Since both ratios are non-decreasing, their product $\frac{r_0' r_1'}{T'^2} \ge \frac{r_0 r_1}{T^2}$, implying $Q_s' \ge Q_s$.
+       - **Burns (`pair.burn`):** Redeemed asset amounts are floored: $a_i = \lfloor S r_i / T \rfloor \le S r_i / T$. Remaining reserves $r_i' = r_i - a_i \ge r_i(1 - S/T)$. Because remaining shares are $T' = T(1 - S/T)$, the remaining asset density $\frac{r_i'}{T'} \ge \frac{r_i}{T}$ is analytically non-decreasing for both assets, guaranteeing $Q_s' \ge Q_s$.
+       - **Donations & Skim:** Token donations increase physical balances without altering stored reserves ($Q_s' = Q_s$); `skim()` removes excess balance without modifying stored reserves ($Q_s' = Q_s$); `sync()` updates stored reserves to actual balances ($\ge r_i$), preserving or growing $Q_s$.
+     * **Integer Widths & Arithmetic Precision:**
+       Reserves $r_0, r_1 \le \text{type}(uint112).\text{max} < 2^{112} \implies r_0 r_1 < 2^{224}$. Total supply $T \le 2^{112} \implies T^2 \le 2^{224} < 2^{256}$. Intermediate product $r_0 r_1 \cdot 10^{18} < 2^{284} \ll 2^{512}$ is computed with OpenZeppelin `Math.mulDiv` (512-bit precision via Chinese Remainder Theorem), completely avoiding intermediate overflow or lossy truncations.
      * **Explicit Assumptions & Scope Constraints:**
-       - **Standard ERC-20 Axiom:** Monotonicity holds strictly for tokens conforming to standard ERC-20 balance conservation. If a token contracts supply via negative rebase and `sync()` is called, reserves drop while total supply remains constant, causing $K_{\text{per\_share}}$ to collapse (demonstrated in `test_Adversarial_NegativeRebaseBricksSwapsWithoutSync`).
+       - **Standard ERC-20 Axiom:** Monotonicity holds strictly for tokens conforming to standard ERC-20 balance conservation. If a token contracts supply via negative rebase and `sync()` is called, reserves drop while total supply remains constant, causing $Q_s$ to collapse (demonstrated in `test_Adversarial_NegativeRebaseBricksSwapsWithoutSync`).
        - **Solvency & Dead-Address Lock:** Total supply must never drop to zero ($T \ge \text{MINIMUM\_LIQUIDITY} = 1000$ wei permanently locked at `DEAD_ADDRESS`).
        - **Empirical Fuzz Evidence vs. Analytical Guarantees:** Running 1,000 runs and 50,000 calls across 12 action selectors without counterexample establishes strong empirical support within the explored operational domain, while the guarantee of non-decreasing asset density is analytically bounded by the floor-rounding mechanics under the stated ERC-20 and solvency assumptions.
   2. **Swap-Specific Fee Accretion Invariants:**
      In `AMMHandler`, actions `swap0`, `swap1`, and `swapViaRouter` explicitly assert that post-swap raw $K \ge \text{preK}$, ensuring fee growth on every individual swap transaction.
   3. **Burn-Specific Consistency Invariants:**
-     In `AMMHandler.removeLiquidity`, post-burn $K_{\text{per\_share}}$ is asserted to be greater than or equal to pre-burn $K_{\text{per\_share}}$, confirming proportional asset accounting.
+     In `AMMHandler.removeLiquidity`, post-burn $Q_s$ is asserted to be greater than or equal to pre-burn $Q_s$, confirming proportional asset accounting.
   4. **Sensitivity & Vulnerability Detection Verification:**
-     In `test_Adversarial_KPerShareInvariantValidUnderLiquidityRemovalAndFailsOnExploit`, verified that while legitimate burns drop raw $K$ from peak while preserving $K_{\text{per\_share}}$, an exploit drain (e.g. callback reentrancy or unauthorized reserve extraction) collapses $K_{\text{per\_share}}$ by over 99%, confirming the invariant detects security breaches.
+     In `test_Adversarial_KPerShareInvariantValidUnderLiquidityRemovalAndFailsOnExploit`, verified that while legitimate burns drop raw $K$ from peak while preserving $Q_s$, an exploit drain collapses $Q_s$ by over 99%, confirming the invariant detects security breaches.
   5. **Bounded Operational Idle Model & Active Time Warping:**
      Added `MAX_HARNESS_IDLE_SECONDS = 30 days` to `AMMHandler`. All state-mutating pair actions record `lastPairActionTimestamp = block.timestamp;`. `warpTime(uint256 timeSeed)` advances time dynamically between 1 second and 1 day, while bounding cumulative idle time.
   6. **Modular Cumulative Progress Property:**
      Added `invariant_PriceCumulativeModularProgress` with documented non-wrapping domain assumptions. Direct modular overflow across $2^{256}$ and $2^{32}$ rollover is independently verified via deterministic unit tests.
 * **Verification:**
-  1,000 runs, 50,000 calls across 12 action selectors. `warpTime` was invoked **4,195 times** with 0 invariant violations across all 6 invariants.
+  1,000 runs, 50,000 calls across 12 action selectors with 0 invariant violations across all 6 invariants.
 
 ---
 
@@ -247,7 +255,9 @@ Consistent status definitions applied across the review:
   6. **Cumulative Modular Subtraction Across $2^{256}$:**
      Two's complement subtraction `unchecked { price0Cumulative - price0CumulativeLast }` accurately computes positive price growth even when the accumulator wraps across $2^{256}-1$.
   7. **K Per Share Invariant Preservation & Exploit Drain Sensitivity:**
-     `test_Adversarial_KPerShareInvariantValidUnderLiquidityRemovalAndFailsOnExploit` proves that proportional liquidity burns legitimately drop raw $K$ from peak while preserving $K_{\text{per\_share}}$, and that an exploit drain collapses $K_{\text{per\_share}}$ by over 99%, confirming that the invariant suite reliably detects security breaches.
+     `test_Adversarial_KPerShareInvariantValidUnderLiquidityRemovalAndFailsOnExploit` proves that proportional liquidity burns legitimately drop raw $K$ from peak while preserving $Q_s$, and that an exploit drain collapses $Q_s$ by over 99%, confirming that the invariant suite reliably detects security breaches.
+  8. **Deterministic Counterexample to Separately Floored Ratios:**
+     `test_Adversarial_ProductOfFlooredRatiosDecreasesOnSwapCounterexample` proves that the naive two-floor metric $\lfloor r_0 \cdot 10^{18} / T \rfloor \times \lfloor r_1 \cdot 10^{18} / T \rfloor$ strictly decreases across a valid fee-paying swap (by $10^{18}$), while raw $K$ strictly grows and the single-floored scaled metric $Q_s = \lfloor (r_0 r_1 \cdot 10^{18}) / T^2 \rfloor$ remains non-decreasing.
 
 ---
 
