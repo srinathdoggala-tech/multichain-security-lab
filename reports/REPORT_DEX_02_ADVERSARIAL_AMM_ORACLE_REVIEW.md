@@ -109,8 +109,16 @@ Consistent status definitions applied across the review:
 * **Remediation Implemented:**
   1. **Accounting-Aware Invariant (`invariant_KPerSharePreservedOrGrown`):**
      Replaced unconditional raw $K$ monotonicity with reserve product per share unit:
-     $$K_{\text{per\_share}} = \left(\frac{r_0 \cdot 10^{18}}{\text{totalSupply}}\right) \times \left(\frac{r_1 \cdot 10^{18}}{\text{totalSupply}}\right)$$
-     Because proportional burns reduce reserves and shares identically, $K_{\text{per\_share}}$ is non-decreasing across all AMM operations (swaps grow it via retained 0.3% fees, donations grow it, mints and burns preserve it within fractional rounding dust).
+     $$K_{\text{per\_share}} = \left\lfloor\frac{r_0 \cdot 10^{18}}{\text{totalSupply}}\right\rfloor \times \left\lfloor\frac{r_1 \cdot 10^{18}}{\text{totalSupply}}\right\rfloor$$
+     * **Proof Rationale & EVM Integer Truncation Dynamics:**
+       - **Swaps:** Total supply is constant; the 0.3% LP fee ensures post-swap raw $K \ge \text{preK}$, strictly increasing $K_{\text{per\_share}}$.
+       - **Mints (`pair.mint`):** Minted liquidity is floored: $L = \min\left(\lfloor a_0 T / r_0 \rfloor, \lfloor a_1 T / r_1 \rfloor\right) \le a_0 T / r_0$. Flooring newly issued shares reduces the new denominator $T' = T + L$, ensuring the post-mint ratio $\frac{r_i'}{T'} \ge \frac{r_i}{T}$ strictly favors existing pool reserves.
+       - **Burns (`pair.burn`):** Redeemed asset amounts are floored: $a_i = \lfloor S r_i / T \rfloor \le S r_i / T$. Remaining reserves $r_i' = r_i - a_i \ge r_i(1 - S/T)$. Because remaining shares are $T' = T(1 - S/T)$, the remaining asset density $\frac{r_i'}{T'} \ge \frac{r_i}{T}$ is mathematically non-decreasing. By monotonicity of the integer floor function ($x \ge y \implies \lfloor x \rfloor \ge \lfloor y \rfloor$), $K_{\text{per\_share}}$ is non-decreasing across all burns.
+       - **Donations & Skim:** Token donations increase physical balances; `skim()` removes excess balance without modifying stored reserves; `sync()` updates stored reserves to balances ($\ge r_i$), preserving or growing reserve density.
+     * **Preconditions & Scope Qualifications:**
+       - **Standard ERC-20 Axiom:** Monotonicity holds strictly for tokens conforming to standard ERC-20 balance conservation. If a token contracts supply via negative rebase and `sync()` is called, reserves drop while total supply remains constant, causing $K_{\text{per\_share}}$ to collapse (demonstrated in `test_Adversarial_NegativeRebaseBricksSwapsWithoutSync`).
+       - **Solvency & Dead-Address Lock:** Total supply must never drop to zero ($T \ge \text{MINIMUM\_LIQUIDITY} = 1000$ wei permanently locked at `DEAD_ADDRESS`).
+       - **Fuzzing vs. Mathematical Proof:** Running 1,000 runs and 50,000 calls without counterexample establishes high empirical confidence across the sampled bounded space, but the guarantee of non-decreasing asset density relies on the deductive proof of floor-rounding directions outlined above.
   2. **Swap-Specific Fee Accretion Invariants:**
      In `AMMHandler`, actions `swap0`, `swap1`, and `swapViaRouter` explicitly assert that post-swap raw $K \ge \text{preK}$, ensuring fee growth on every individual swap transaction.
   3. **Burn-Specific Consistency Invariants:**
@@ -122,7 +130,7 @@ Consistent status definitions applied across the review:
   6. **Modular Cumulative Progress Property:**
      Added `invariant_PriceCumulativeModularProgress` with documented non-wrapping domain assumptions. Direct modular overflow across $2^{256}$ and $2^{32}$ rollover is independently verified via deterministic unit tests.
 * **Verification:**
-  1,000 runs, 50,000 calls. `warpTime` was invoked **4,130 times** with 0 invariant violations across all 6 invariants.
+  1,000 runs, 50,000 calls across 12 action selectors. `warpTime` was invoked **4,195 times** with 0 invariant violations across all 6 invariants.
 
 ---
 

@@ -27,21 +27,27 @@ The `AMMHandler` models an adversarial multi-actor environment with 3 distinct u
 | `failedSwapZeroOutput` | Attempting to call `swap(0, 0, ...)` | Must revert and leave reserves unchanged |
 | `attemptReentrantCallback` | Flash-swap callback attempting reentrant calls (`swap`, `mint`, `burn`, `sync`) | Tested against `InvariantReentrancyAttacker` |
 | `swapViaRouter` | Routing swaps through `AviorRouter` with exact slippage validation | Slippage strictly verified: `received >= minOut` |
+| `warpTime` | Dynamically advancing EVM block time within harness operational limit | Bounded time jump (1s to 1 day; cumulative idle <= 30 days) |
 
 ---
 
 ## 3. Formally Verified Invariants
 
-### Invariant 1: Constant-Product $K$ Monotonicity and Non-Zero Guarantee
+### Invariant 1: Constant-Product $K$ Per Share Monotonicity (`invariant_KPerSharePreservedOrGrown`)
 - **Mathematical Intent:**
-  $$\forall t, \quad K(t) = R_0(t) \cdot R_1(t) > 0$$
-  In the absence of liquidity removal, $K$ increases strictly monotonically with each swap due to the 0.3% LP fee ($997/1000$). When liquidity is removed, $K$ decreases proportionally to the burnt shares, but the pool can never be depleted below the locked initial liquidity threshold.
-- **Assumptions:**
-  - Token decimals are standard 18 decimals without rebasing or transfer fee deduction.
-  - Pool is seeded with initial non-zero reserves.
-- **Relevant Handler Actions:** `swap0`, `swap1`, `addLiquidity`, `removeLiquidity`, `swapViaRouter`.
-- **How Tested:** Checked after every sequence call via `invariant_KIsPreservedOrGrown()`.
-- **Limitations:** Does not prevent extreme price shifts caused by one-sided liquidity imbalance, which is the natural economic consequence of large swaps.
+  $$\forall t_2 \ge t_1, \quad K_{\text{per\_share}}(t_2) \ge K_{\text{per\_share}}(t_1)$$
+  where
+  $$K_{\text{per\_share}} = \left\lfloor\frac{r_0 \cdot 10^{18}}{\mathcal{T}}\right\rfloor \times \left\lfloor\frac{r_1 \cdot 10^{18}}{\mathcal{T}}\right\rfloor$$
+- **Proof Rationale & EVM Integer Truncation:**
+  - **Swaps:** Total LP shares $\mathcal{T}$ remain constant; the 0.3% retained fee ensures post-swap $r_0' \cdot r_1' \ge r_0 \cdot r_1$, strictly growing $K_{\text{per\_share}}$.
+  - **Mints (`pair.mint`):** Minted shares are floored: $\mathcal{L} = \min\left(\lfloor a_0 \mathcal{T} / r_0 \rfloor, \lfloor a_1 \mathcal{T} / r_1 \rfloor\right) \le a_0 \mathcal{T} / r_0$. Flooring new shares down reduces the new total supply $\mathcal{T}' = \mathcal{T} + \mathcal{L}$, ensuring $\frac{r_i'}{\mathcal{T}'} \ge \frac{r_i}{\mathcal{T}}$, rounding in favor of the pool.
+  - **Burns (`pair.burn`):** Redeemed asset amounts are floored: $a_i = \lfloor \mathcal{S} r_i / \mathcal{T} \rfloor \le \mathcal{S} r_i / \mathcal{T}$. Remaining reserves are $r_i' = r_i - a_i \ge r_i(1 - \mathcal{S}/\mathcal{T})$. Since remaining supply is $\mathcal{T}' = \mathcal{T}(1 - \mathcal{S}/\mathcal{T})$, asset density $\frac{r_i'}{\mathcal{T}'} \ge \frac{r_i}{\mathcal{T}}$ is non-decreasing. By floor monotonicity ($x \ge y \implies \lfloor x \rfloor \ge \lfloor y \rfloor$), $K_{\text{per\_share}}$ is non-decreasing across all burns.
+  - **Donations & Skim:** Token donations increase physical balances; `skim()` removes excess balance without modifying stored reserves; `sync()` updates stored reserves to balances ($\ge r_i$), preserving or growing reserve density.
+- **Assumptions & Preconditions:**
+  - Token balances conform to standard ERC-20 conservation without external decreases (non-rebasing, non-fee-on-transfer for stored pool balances).
+  - Total supply never drops to zero ($\mathcal{T} \ge \text{MINIMUM\_LIQUIDITY} = 1000$ wei permanently locked at `DEAD_ADDRESS`).
+- **Relevant Handler Actions:** `swap0`, `swap1`, `addLiquidity`, `removeLiquidity`, `donate`, `skim`, `sync`, `swapViaRouter`.
+- **How Tested:** Checked via `invariant_KPerSharePreservedOrGrown()`.
 - **Empirical Status:** **VERIFIED** across 50,000 handler calls (1,000 runs, depth 50).
 
 ---
@@ -86,56 +92,66 @@ The `AMMHandler` models an adversarial multi-actor environment with 3 distinct u
 
 ---
 
-### Invariant 5: Reentrancy Invariance & Complete Failure Atomicity
+### Invariant 5: Time-Weighted Price Cumulative Modular Progress (`invariant_PriceCumulativeModularProgress`)
 - **Mathematical Intent:**
-  $$\forall \text{ call } c \in \{\text{swap}, \text{mint}, \text{burn}, \text{sync}\}, \quad \text{lock} = 1 \implies c \text{ reverts with } \text{ReentrancyGuardReentrantCall()}$$
-  Furthermore, any transaction that fails or reverts must leave contract storage bit-for-bit identical to its pre-call state.
-- **Assumptions:**
-  - EVM state reversion operates normally.
-- **Relevant Handler Actions:** `attemptReentrantCallback`, `failedSwapExcessiveOutput`, `failedSwapZeroOutput`.
-- **How Tested:** Handler explicitly tests `pre0 == post0` and `pre1 == post1` after catch blocks, and logs successful reentrancy blocks.
-- **Limitations:** Reentrancy guard does not protect read-only reentrancy in external protocols if view functions expose un-synchronized reserves during an external callback (which is why flash swaps are secured and external view calls are evaluated).
-- **Empirical Status:** **VERIFIED** across 4,558 reentrancy attempts and 9,044 failed swap attempts.
+  Within the non-wrapping domain (cumulative price $< 2^{256}$), cumulative price accumulators are monotonically non-decreasing:
+  $$P_{\text{cum}}(t_2) \ge P_{\text{cum}}(t_1)$$
+- **Scope & Assumptions:** Holds within the non-wrapping domain over the bounded fuzz campaign. Rollover across $2^{32}$ seconds and overflow across $2^{256}$ are tested deterministically in `AdversarialSecurityAudit.t.sol`.
+- **How Tested:** Checked via `invariant_PriceCumulativeModularProgress()`.
+- **Empirical Status:** **VERIFIED** across 50,000 handler calls.
+
+---
+
+### Invariant 6: Stored Block Timestamp Consistency (`invariant_TimestampConsistency`)
+- **Mathematical Intent:**
+  Stored `blockTimestampLast` is never in the future relative to the EVM block clock, and elapsed time between updates never exceeds the operational harness bound:
+  $$\text{elapsed} \le \text{MAX\_HARNESS\_IDLE\_SECONDS} = 30\text{ days}$$
+- **Relevant Handler Actions:** All actions and `warpTime`.
+- **How Tested:** Checked via `invariant_TimestampConsistency()`.
+- **Empirical Status:** **VERIFIED** across 50,000 handler calls.
 
 ---
 
 ## 4. Foundry Invariant Test Execution Evidence
-
 ```
 Ran 1 test for test/invariants/AviorAMMPairInvariant.t.sol:AviorAMMPairInvariantTest
 [PASS]
 AviorAMMPairInvariantTest invariants:
-[PASS] invariant_KIsPreservedOrGrown
+[PASS] invariant_KPerSharePreservedOrGrown
 [PASS] invariant_PermanentMinimumLiquidityPreserved
+[PASS] invariant_PriceCumulativeModularProgress
 [PASS] invariant_ReservesCoveredByTokenBalances
+[PASS] invariant_TimestampConsistency
 [PASS] invariant_ZeroSharesCannotBurnAssets
- AviorAMMPairInvariantTest invariants (runs: 1000, calls: 50000, reverts: 96)
+ AviorAMMPairInvariantTest invariants (runs: 1000, calls: 50000, reverts: 40)
 
 ╭------------+---------------------------+-------+---------+----------╮
 | Contract   | Selector                  | Calls | Reverts | Discards |
 +=====================================================================+
-| AMMHandler | addLiquidity              | 4605  | 0       | 0        |
+| AMMHandler | addLiquidity              | 4179  | 0       | 0        |
 |------------+---------------------------+-------+---------+----------|
-| AMMHandler | attemptReentrantCallback  | 4558  | 0       | 0        |
+| AMMHandler | attemptReentrantCallback  | 4128  | 0       | 0        |
 |------------+---------------------------+-------+---------+----------|
-| AMMHandler | donate                    | 4454  | 0       | 0        |
+| AMMHandler | donate                    | 4302  | 0       | 0        |
 |------------+---------------------------+-------+---------+----------|
-| AMMHandler | failedSwapExcessiveOutput | 4476  | 0       | 0        |
+| AMMHandler | failedSwapExcessiveOutput | 4086  | 0       | 0        |
 |------------+---------------------------+-------+---------+----------|
-| AMMHandler | failedSwapZeroOutput      | 4568  | 0       | 0        |
+| AMMHandler | failedSwapZeroOutput      | 4098  | 0       | 0        |
 |------------+---------------------------+-------+---------+----------|
-| AMMHandler | removeLiquidity           | 4453  | 96      | 0        |
+| AMMHandler | removeLiquidity           | 4227  | 40      | 0        |
 |------------+---------------------------+-------+---------+----------|
-| AMMHandler | skim                      | 4620  | 0       | 0        |
+| AMMHandler | skim                      | 4121  | 0       | 0        |
 |------------+---------------------------+-------+---------+----------|
-| AMMHandler | swap0                     | 4618  | 0       | 0        |
+| AMMHandler | swap0                     | 4197  | 0       | 0        |
 |------------+---------------------------+-------+---------+----------|
-| AMMHandler | swap1                     | 4536  | 0       | 0        |
+| AMMHandler | swap1                     | 4167  | 0       | 0        |
 |------------+---------------------------+-------+---------+----------|
-| AMMHandler | swapViaRouter             | 4481  | 0       | 0        |
+| AMMHandler | swapViaRouter             | 4094  | 0       | 0        |
 |------------+---------------------------+-------+---------+----------|
-| AMMHandler | sync                      | 4631  | 0       | 0        |
+| AMMHandler | sync                      | 4206  | 0       | 0        |
+|------------+---------------------------+-------+---------+----------|
+| AMMHandler | warpTime                  | 4195  | 0       | 0        |
 ╰------------+---------------------------+-------+---------+----------╯
 
-Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 38.97s (38.27s CPU time)
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 49.68s (49.67s CPU time)
 ```
